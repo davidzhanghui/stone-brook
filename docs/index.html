@@ -8,7 +8,7 @@
 <meta property="og:type" content="website">
 <meta property="og:title" content="石渠 Stonebrook — 藏书于石，引水成渠">
 <meta property="og:description" content="纯本地的块级文档编辑器 · Rust + GPUI · 画板 / 草图 / 电子表格 / 多维表格 · 没有账号，没有云端">
-<meta property="og:image" content="https://raw.githubusercontent.com/davidzhanghui/stone-book/main/docs/stonebrook-og.jpg">
+<meta property="og:image" content="https://raw.githubusercontent.com/davidzhanghui/stone-brook/main/docs/stonebrook-og.jpg">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="logo-256.png">
@@ -226,7 +226,7 @@
       <a href="#editors">编辑器</a>
       <a href="#local">本地</a>
       <a href="#install">下载</a>
-      <a class="gh" href="https://github.com/davidzhanghui/stone-book" target="_blank" rel="noopener">
+      <a class="gh" href="https://github.com/davidzhanghui/stone-brook" target="_blank" rel="noopener">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         GitHub
       </a>
@@ -279,7 +279,7 @@
     <div class="video-shell reveal">
       <video controls playsinline preload="metadata" poster="stonebrook-promo-poster.jpg">
         <source src="stonebrook-promo-v2.2.mp4" type="video/mp4">
-        <source src="https://raw.githubusercontent.com/davidzhanghui/stone-book/main/docs/stonebrook-promo-v2.2.mp4" type="video/mp4">
+        <source src="https://raw.githubusercontent.com/davidzhanghui/stone-brook/main/docs/stonebrook-promo-v2.2.mp4" type="video/mp4">
       </video>
     </div>
     <p class="video-note">按块书写 · 网页粘贴还原 · 流程图与公式 · 画板 · 草图 · 电子表格 · 多维表格 · 数据只在本机<br>
@@ -475,29 +475,29 @@
         <h3>安装包</h3>
         <p>下载对应芯片的 DMG，把「石渠」拖进「应用程序」。</p>
         <div class="dl">
-          <a href="https://github.com/davidzhanghui/stone-book/releases/download/v2.3.0/Stonebrook-2.3.0-arm64.dmg">
+          <a href="https://github.com/davidzhanghui/stone-brook/releases/download/v2.3.0/Stonebrook-2.3.0-arm64.dmg">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>
             <div><b>Apple 芯片</b><span>M1 / M2 / M3 / M4 · arm64</span></div><em>23.7 MB</em>
           </a>
-          <a href="https://github.com/davidzhanghui/stone-book/releases/download/v2.3.0/Stonebrook-2.3.0-x86_64.dmg">
+          <a href="https://github.com/davidzhanghui/stone-brook/releases/download/v2.3.0/Stonebrook-2.3.0-x86_64.dmg">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>
             <div><b>Intel 芯片</b><span>x86_64</span></div><em>25.7 MB</em>
           </a>
         </div>
-        <p class="note">安装包使用 ad-hoc 签名，首次打开如被拦截，请到「系统设置 → 隐私与安全性」中点「仍要打开」。其他版本见 <a href="https://github.com/davidzhanghui/stone-book/releases" target="_blank" rel="noopener">Releases</a>。</p>
+        <p class="note">安装包使用 ad-hoc 签名，首次打开如被拦截，请到「系统设置 → 隐私与安全性」中点「仍要打开」。其他版本见 <a href="https://github.com/davidzhanghui/stone-brook/releases" target="_blank" rel="noopener">Releases</a>。</p>
       </div>
       <div class="box reveal">
         <h3>从源码构建</h3>
         <p>需要 Rust 1.85+ 和 Xcode 命令行工具，不需要 Metal 工具链。</p>
         <div class="codeblock">
-          <pre><code>git clone https://github.com/davidzhanghui/stone-book.git
-cd stone-book
+          <pre><code>git clone https://github.com/davidzhanghui/stone-brook.git
+cd stone-brook
 <span class="cm"># 直接运行</span>
 cargo run --release
 <span class="cm"># 打包 dist/石渠.app + DMG</span>
 scripts/build.sh</code></pre>
-          <button class="copy-btn" data-copy="git clone https://github.com/davidzhanghui/stone-book.git
-cd stone-book
+          <button class="copy-btn" data-copy="git clone https://github.com/davidzhanghui/stone-brook.git
+cd stone-brook
 cargo run --release">复制</button>
         </div>
         <p class="note">数据目录默认 <code>~/Stonebrook/</code>，可用环境变量 <code>STONEBROOK_DATA_DIR</code> 覆盖。</p>
@@ -509,7 +509,7 @@ cargo run --release">复制</button>
 <footer>
   <div class="wrap">
     <div class="f-brand"><img src="logo.svg" alt=""><div><b>石渠 Stonebrook</b><span>藏书于石，引水成渠。</span></div></div>
-    <p>MIT License · <a href="https://github.com/davidzhanghui/stone-book" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/davidzhanghui/stone-book/blob/main/docs/FEATURES.md" target="_blank" rel="noopener">完整功能清单</a><br>
+    <p>MIT License · <a href="https://github.com/davidzhanghui/stone-brook" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/davidzhanghui/stone-brook/blob/main/docs/FEATURES.md" target="_blank" rel="noopener">完整功能清单</a><br>
       宣传片配乐 “Awakening Dew” by Keys of Moon，CC BY 4.0</p>
   </div>
 </footer>
