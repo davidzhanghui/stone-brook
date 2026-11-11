@@ -4,6 +4,7 @@ use super::geom::{self, v, R, V};
 use super::model::Element;
 use super::model::*;
 use super::view::*;
+use crate::canvas::math;
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -403,14 +404,7 @@ impl SketchEditor {
         self.snapshot();
         let all = units.iter().map(|(_, r)| *r).reduce(|a, b| a.union(&b)).unwrap();
         for (ids, r) in &units {
-            let (dx, dy) = match k {
-                0 => (all.x0 - r.x0, 0.),
-                1 => (all.center().x - r.center().x, 0.),
-                2 => (all.x1 - r.x1, 0.),
-                3 => (0., all.y0 - r.y0),
-                4 => (0., all.center().y - r.center().y),
-                _ => (0., all.y1 - r.y1),
-            };
+            let (dx, dy) = math::align_delta(math::Align::from_index(k), (all.x0, all.y0, all.x1, all.y1), (r.x0, r.y0, r.x1, r.y1));
             self.shift_ids(ids, dx, dy);
         }
         let moved: Vec<String> = units.into_iter().flat_map(|(ids, _)| ids).collect();
@@ -430,18 +424,13 @@ impl SketchEditor {
         } else {
             units.sort_by(|a, b| a.1.center().y.total_cmp(&b.1.center().y));
         }
-        let all = units.iter().map(|(_, r)| *r).reduce(|a, b| a.union(&b)).unwrap();
-        let total: f64 = units.iter().map(|(_, r)| if horizontal { r.w() } else { r.h() }).sum();
-        let gap = ((if horizontal { all.w() } else { all.h() }) - total) / (units.len() - 1) as f64;
-        let mut cur = if horizontal { all.x0 } else { all.y0 };
-        for (ids, r) in &units {
-            let d = if horizontal { cur - r.x0 } else { cur - r.y0 };
+        let spans: Vec<(f64, f64)> = units.iter().map(|(_, r)| if horizontal { (r.x0, r.w()) } else { (r.y0, r.h()) }).collect();
+        for ((ids, _), (at, (from, _))) in units.iter().zip(math::distribute(&spans).into_iter().zip(spans)) {
+            let d = at - from;
             if horizontal {
                 self.shift_ids(ids, d, 0.);
-                cur += r.w() + gap;
             } else {
                 self.shift_ids(ids, 0., d);
-                cur += r.h() + gap;
             }
         }
         let moved: Vec<String> = units.into_iter().flat_map(|(ids, _)| ids).collect();

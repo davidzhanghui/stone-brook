@@ -323,33 +323,32 @@ fn is_live_kind(kind: Preview) -> bool {
 
 /// webm 播放页：黑底 + 原生 video 控件，自动播放。返回 (页面, 允许读取的根目录)。
 fn video_page(path: &str) -> Option<(PathBuf, PathBuf)> {
-    let dir = crate::webview::cache_dir();
-    let page = dir.join(format!("webm-{}.html", crate::webview::hash_key(&[path, "webm2"])));
+    // 页面与视频放进同一个独立目录，WebView 只获得这个目录的读权限
+    // （原来取缓存目录与 assets 的共同上级，等于把整个数据目录、包括数据库都开放给了页面）。
+    // 视频以硬链接放进来：不占额外空间；跨卷等硬链接失败时退回拷贝。
+    let root = crate::webview::cache_dir().join(format!("webm-{}", crate::webview::hash_key(&[path, "webm3"])));
+    let ext = Path::new(path).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "webm".into());
+    let video = root.join(format!("video.{ext}"));
+    let page = root.join("index.html");
+    if !video.exists() {
+        std::fs::create_dir_all(&root).ok()?;
+        if std::fs::hard_link(path, &video).is_err() {
+            std::fs::copy(path, &video).ok()?;
+        }
+    }
     if !page.exists() {
-        let url: String = path
-            .bytes()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-                _ => format!("%{b:02X}"),
-            })
-            .collect();
         let html = format!(
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}\
 video{{display:block;width:100%;height:100%;object-fit:contain;outline:none}}\
 #m{{display:none;position:fixed;inset:0;align-items:center;justify-content:center;padding:24px;text-align:center;\
 color:#c9cdd4;font:14px/1.7 -apple-system,'PingFang SC',sans-serif}}</style></head>\
-<body><video src=\"file://{url}\" controls autoplay playsinline></video>\
+<body><video src=\"video.{ext}\" controls autoplay playsinline></video>\
 <div id=\"m\">无法在应用内播放这个 webm 文件<br>系统 WebView 可能不支持它的视频编码（如 VP9），请用其他应用打开</div>\
 <script>var v=document.querySelector('video'),m=document.getElementById('m');\
 function fail(){{v.style.display='none';m.style.display='flex'}}v.addEventListener('error',fail);\
 setTimeout(function(){{if(v.readyState<2)fail()}},4000);</script></body></html>"
         );
         std::fs::write(&page, html).ok()?;
-    }
-    // 页面在缓存目录、视频在 assets：取两者的共同上级作为可读目录
-    let mut root = dir.clone();
-    while !Path::new(path).starts_with(&root) {
-        root = root.parent()?.to_path_buf();
     }
     Some((page, root))
 }
@@ -362,7 +361,7 @@ enum Thumb {
 }
 
 thread_local! {
-    static THUMBS: RefCell<HashMap<String, Thumb>> = RefCell::new(HashMap::new());
+    static THUMBS: RefCell<crate::lru::Lru<String, Thumb>> = RefCell::new(crate::lru::Lru::new(256));
 }
 
 /// 系统 Quick Look 生成的首页缩略图：已缓存直接返回，否则后台生成。
@@ -462,8 +461,8 @@ impl Editor {
     fn attach_hover(&mut self, id: u64, on: bool, cx: &mut Context<Self>) {
         self.file_hover_epoch += 1;
         if on {
-            if self.file_hover != Some(id) {
-                self.file_hover = Some(id);
+            if self.sess.file_hover != Some(id) {
+                self.sess.file_hover = Some(id);
                 cx.notify();
             }
             return;
@@ -472,8 +471,8 @@ impl Editor {
         cx.spawn(async move |this: WeakEntity<Editor>, cx: &mut AsyncApp| {
             cx.background_executor().timer(Duration::from_millis(220)).await;
             this.update(cx, |this, cx| {
-                if this.file_hover_epoch == epoch && this.file_hover == Some(id) {
-                    this.file_hover = None;
+                if this.file_hover_epoch == epoch && this.sess.file_hover == Some(id) {
+                    this.sess.file_hover = None;
                     cx.notify();
                 }
             })
@@ -484,8 +483,8 @@ impl Editor {
 
     fn set_file_view(&mut self, ix: usize, v: u8, cx: &mut Context<Self>) {
         let id = self.content.blocks[ix].id;
-        if self.html_live == Some(id) {
-            self.html_live = None;
+        if self.sess.html_live == Some(id) {
+            self.sess.html_live = None;
             crate::webview::hide_live();
         }
         self.update_kind(
@@ -523,16 +522,16 @@ impl Editor {
                 let id = blk.id;
                 crate::media::pause_others(id);
                 crate::media::with(id, path, |p| p.play());
-                self.video_full = Some(id);
+                self.sess.video_full = Some(id);
                 cx.notify();
             }
             BlockKind::File { .. } => {
-                if self.html_live.take().is_some() {
+                if self.sess.html_live.take().is_some() {
                     crate::webview::hide_live();
                 }
-                self.file_hover = None;
-                self.img_views.remove(&(blk.id | super::imgview::FULL_KEY));
-                self.file_full = Some(blk.id);
+                self.sess.file_hover = None;
+                self.sess.img_views.remove(&(blk.id | super::imgview::FULL_KEY));
+                self.sess.file_full = Some(blk.id);
                 cx.notify();
             }
             _ => {}
@@ -540,7 +539,7 @@ impl Editor {
     }
 
     fn close_file_full(&mut self, cx: &mut Context<Self>) {
-        if self.file_full.take().is_some() {
+        if self.sess.file_full.take().is_some() {
             crate::webview::hide_live();
             cx.notify();
         }
@@ -558,7 +557,7 @@ impl Editor {
     /// Markdown / 文本 / HTML / PDF / webm 由原生 WebView、Office / iWork 由 QLPreviewView 叠加在内容区（见 render.rs）；
     /// 图片直接显示原图，音频显示播放条，压缩包显示目录树，不支持的类型给出「用其他应用打开」。
     pub(super) fn render_file_full(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = self.file_full?;
+        let id = self.sess.file_full?;
         let ix = self.content.blocks.iter().position(|b| b.id == id)?;
         let BlockKind::File { path, name, size, .. } = &self.content.blocks[ix].kind else { return None };
         let (path, name, size) = (path.clone(), name.clone(), *size);
@@ -737,8 +736,8 @@ impl Editor {
         let selected = focused && self.block_selected(ix);
         let kind = if is_video { Preview::Video } else { preview_kind(&name) };
         let uploading = self.uploads.get(&path).map(|p| p.load(Ordering::Relaxed).min(999));
-        if self.html_live == Some(id) && self.head.block != ix {
-            self.html_live = None;
+        if self.sess.html_live == Some(id) && self.core.head.block != ix {
+            self.sess.html_live = None;
             cx.notify();
         }
         let body: AnyElement = match (uploading, view) {
@@ -748,8 +747,8 @@ impl Editor {
             (None, _) if is_video => self.render_video(ix, blk, &path, &name, selected, t, window, cx),
             (None, _) => self.render_file_preview(ix, blk, &path, &name, kind, selected, t, cx),
         };
-        let sole = self.head.block == ix && self.anchor.block == ix;
-        let show_tb = uploading.is_none() && (self.file_hover == Some(id) || (self.file_hover.is_none() && selected && sole));
+        let sole = self.core.head.block == ix && self.core.anchor.block == ix;
+        let show_tb = uploading.is_none() && (self.sess.file_hover == Some(id) || (self.sess.file_hover.is_none() && selected && sole));
         let center = view == FILE_VIEW_PREVIEW && uploading.is_none();
         let video_pv = center && is_video;
         let toolbar = show_tb.then(|| self.render_attach_toolbar(ix, id, view, t, cx));
@@ -1040,7 +1039,7 @@ impl Editor {
         if super::imgview::viewable(name) && Path::new(path).exists() && self.image_size(path).is_some() {
             return self.render_image_file_preview(ix, blk, path, name, width, selected, t, cx);
         }
-        let live = self.html_live == Some(id);
+        let live = self.sess.html_live == Some(id);
         let can_live = is_live_kind(kind);
         let thumb = matches!(kind, Preview::Pdf | Preview::Office | Preview::Image);
         let size = match blk.kind {
@@ -1127,8 +1126,8 @@ impl Editor {
                             this.mouse_select(Pos::new(ix, 0, 0), 1, ev.modifiers.shift, cx);
                             if ev.click_count >= 2 && !can_live {
                                 this.open_attachment(ix, cx);
-                            } else if can_live && this.html_live != Some(id) {
-                                this.html_live = Some(id);
+                            } else if can_live && this.sess.html_live != Some(id) {
+                                this.sess.html_live = Some(id);
                                 cx.notify();
                             }
                         }),
@@ -1206,8 +1205,8 @@ impl Editor {
                     cx.stop_propagation();
                     window.focus(&this.focus);
                     this.mouse_select(Pos::new(ix, 0, 0), 1, ev.modifiers.shift, cx);
-                    if this.html_live != Some(id) {
-                        this.html_live = Some(id);
+                    if this.sess.html_live != Some(id) {
+                        this.sess.html_live = Some(id);
                         cx.notify();
                     }
                 }),
@@ -1276,7 +1275,7 @@ impl Editor {
             BlockKind::Video { width, .. } => *width,
             _ => None,
         };
-        let drag_w = self.image_drag.as_ref().filter(|d| d.block == ix).map(|d| d.width);
+        let drag_w = self.sess.image_drag.as_ref().filter(|d| d.block == ix).map(|d| d.width);
         let w = match drag_w.or(set_w) {
             Some(w) => w,
             None => {
@@ -1293,7 +1292,7 @@ impl Editor {
             on_press: Some(self.block_press(ix, cx)),
             on_full: Some(Rc::new(move |_: &mut Window, cx: &mut App| {
                 this.update(cx, |this, cx| {
-                    this.video_full = Some(id);
+                    this.sess.video_full = Some(id);
                     cx.notify();
                 })
                 .ok();
@@ -1320,7 +1319,7 @@ impl Editor {
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     window.focus(&this.focus);
-                    this.image_drag = Some(super::ImageDrag { block: ix, start_w: w, start_px: ev.position, width: w, dir: 2. });
+                    this.sess.image_drag = Some(super::ImageDrag { block: ix, start_w: w, start_px: ev.position, width: w, dir: 2. });
                     cx.notify();
                 }),
             );

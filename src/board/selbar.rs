@@ -441,53 +441,7 @@ impl BoardEditor {
                 ));
             }
             SelKind::Connector => {
-                let (route, start, end) = match &e.kind {
-                    ElKind::Connector { route, start, end, .. } => (*route, *start, *end),
-                    _ => (Route::Straight, Arrow::None, Arrow::None),
-                };
-                let route_icon = ROUTES.iter().find(|r| r.0 == route).map(|r| r.1).unwrap_or("conn-straight");
-                // 起点箭头 · 箭头方向 · 终点箭头 | 颜色 · 连线样式（类型 / 线型 / 粗细 / 跨线）| 连线说明
-                let short = |a: Arrow, at_end: bool| {
-                    let mut l = LineItem::new(vec![pt(3., 9.), pt(23., 9.)]);
-                    l.stroke = Col::from_hsla(t.text);
-                    l.width = 1.5;
-                    (l.start, l.end) = if at_end { (Arrow::None, a) } else { (a, Arrow::None) };
-                    let scene = Arc::new(Scene { items: vec![Item::Line(l)], width: 26., height: 18., ..Default::default() });
-                    div()
-                        .w(px(26.))
-                        .h(px(18.))
-                        .flex_none()
-                        .child(canvas(|b, _, _| b, move |b, _, win, cx| paint_scene(&scene, View { origin: b.origin, scale: 1. }, b, win, cx)).size_full())
-                };
-                bar = bar
-                    .child(self.drop_btn("sb-start", "起点", Popover::StartArrow, short(start, false).into_any_element(), t, cx))
-                    .child(
-                        self.bar_btn("sb-swap", "箭头方向", false, t)
-                            .child(icon("rotate", 14., t.text))
-                            .on_click(cx.listener(|this, _, _, cx| this.swap_arrows(cx))),
-                    )
-                    .child(self.drop_btn("sb-end", "终点", Popover::EndArrow, short(end, true).into_any_element(), t, cx))
-                    .child(sep())
-                    .child(self.drop_btn(
-                        "sb-lc",
-                        "颜色",
-                        Popover::Border,
-                        div().size(px(16.)).rounded_full().border_2().border_color(e.stroke.hsla()).into_any_element(),
-                        t,
-                        cx,
-                    ))
-                    .child(self.drop_btn("sb-ls", "连线样式", Popover::LineStyle, icon(route_icon, 16., t.text).into_any_element(), t, cx))
-                    .child(sep())
-                    .child(
-                        self.bar_btn("sb-cap", "添加连线说明 ↵", false, t)
-                            .child(div().text_size(px(11.)).line_height(px(11.)).mr(px(-3.)).child("+"))
-                            .child(icon("type", 15., t.text))
-                            .on_click(cx.listener(|this, _, w, cx| {
-                                if let Some(id) = this.single().map(|e| e.id) {
-                                    this.start_edit(id, w, cx);
-                                }
-                            })),
-                    );
+                bar = self.render_bar_connector(t, cx, bar, &e);
             }
             SelKind::Image => {}
             // 彩色素材（表情、头像、技术图标）不能改颜色
@@ -572,35 +526,7 @@ impl BoardEditor {
                 bar = text_group(bar, cx);
             }
             SelKind::Section if e.code.is_some() => {
-                // 代码绘图：编辑代码 | 标题 | 填充 · 边框
-                let lang = super::code::CodeLang::from_u8(e.code_lang);
-                let has_title = !e.text.is_empty();
-                bar = bar
-                    .child(
-                        self.bar_btn("sb-code", if lang == super::code::CodeLang::Mermaid { "编辑 Mermaid 代码" } else { "编辑 PlantUML 代码" }, false, t)
-                            .child(icon("square-code", 17., t.text))
-                            .on_click(cx.listener(move |this, _, w, cx| {
-                                if let Some(id) = this.single().map(|e| e.id) {
-                                    this.open_code(Some(id), lang, w, cx);
-                                }
-                            })),
-                    )
-                    .child(sep())
-                    .child(
-                        self.bar_btn("sb-ctitle", if has_title { "隐藏标题" } else { "添加标题" }, has_title, t)
-                            .child(icon("square-type", 17., if has_title { t.accent } else { t.text }))
-                            .on_click(cx.listener(|this, _, w, cx| this.code_title(w, cx))),
-                    )
-                    .child(sep())
-                    .child(self.drop_btn(
-                        "sb-fill",
-                        "填充",
-                        Popover::Fill,
-                        fill_dot(e.fill).relative().flex().items_center().justify_center().into_any_element(),
-                        t,
-                        cx,
-                    ))
-                    .child(self.drop_btn("sb-border", "边框", Popover::Border, stroke_sq(e.stroke, e.no_stroke).into_any_element(), t, cx));
+                bar = self.render_bar_section(t, cx, bar, e.clone());
             }
             SelKind::Section => {
                 bar = bar
@@ -691,6 +617,101 @@ impl BoardEditor {
                         }
                     })),
             )
+    }
+    /// 从 `render_bar` 拆出。
+    fn render_bar_connector(&self, t: &Theme, cx: &mut Context<Self>, mut bar: Div, e: &El) -> Div {
+        let sep = || div().w(px(1.)).h(px(18.)).mx(px(4.)).bg(t.border);
+        let (route, start, end) = match &e.kind {
+            ElKind::Connector { route, start, end, .. } => (*route, *start, *end),
+            _ => (Route::Straight, Arrow::None, Arrow::None),
+        };
+        let route_icon = ROUTES.iter().find(|r| r.0 == route).map(|r| r.1).unwrap_or("conn-straight");
+        // 起点箭头 · 箭头方向 · 终点箭头 | 颜色 · 连线样式（类型 / 线型 / 粗细 / 跨线）| 连线说明
+        let short = |a: Arrow, at_end: bool| {
+            let mut l = LineItem::new(vec![pt(3., 9.), pt(23., 9.)]);
+            l.stroke = Col::from_hsla(t.text);
+            l.width = 1.5;
+            (l.start, l.end) = if at_end { (Arrow::None, a) } else { (a, Arrow::None) };
+            let scene = Arc::new(Scene { items: vec![Item::Line(l)], width: 26., height: 18., ..Default::default() });
+            div()
+                .w(px(26.))
+                .h(px(18.))
+                .flex_none()
+                .child(canvas(|b, _, _| b, move |b, _, win, cx| paint_scene(&scene, View { origin: b.origin, scale: 1. }, b, win, cx)).size_full())
+        };
+        bar = bar
+            .child(self.drop_btn("sb-start", "起点", Popover::StartArrow, short(start, false).into_any_element(), t, cx))
+            .child(
+                self.bar_btn("sb-swap", "箭头方向", false, t).child(icon("rotate", 14., t.text)).on_click(cx.listener(|this, _, _, cx| this.swap_arrows(cx))),
+            )
+            .child(self.drop_btn("sb-end", "终点", Popover::EndArrow, short(end, true).into_any_element(), t, cx))
+            .child(sep())
+            .child(self.drop_btn(
+                "sb-lc",
+                "颜色",
+                Popover::Border,
+                div().size(px(16.)).rounded_full().border_2().border_color(e.stroke.hsla()).into_any_element(),
+                t,
+                cx,
+            ))
+            .child(self.drop_btn("sb-ls", "连线样式", Popover::LineStyle, icon(route_icon, 16., t.text).into_any_element(), t, cx))
+            .child(sep())
+            .child(
+                self.bar_btn("sb-cap", "添加连线说明 ↵", false, t)
+                    .child(div().text_size(px(11.)).line_height(px(11.)).mr(px(-3.)).child("+"))
+                    .child(icon("type", 15., t.text))
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        if let Some(id) = this.single().map(|e| e.id) {
+                            this.start_edit(id, w, cx);
+                        }
+                    })),
+            );
+        bar
+    }
+
+    /// 从 `render_bar` 拆出。
+    fn render_bar_section(&self, t: &Theme, cx: &mut Context<Self>, mut bar: Div, e: El) -> Div {
+        let sep = || div().w(px(1.)).h(px(18.)).mx(px(4.)).bg(t.border);
+        let fill_dot = |c: Option<Col>| {
+            div()
+                .size(px(16.))
+                .rounded_full()
+                .border_1()
+                .border_color(t.border_strong)
+                .when_some(c, |d, c| d.bg(c.hsla()))
+                .when(c.is_none(), |d| d.child(div().absolute().w(px(18.)).h(px(1.5)).bg(gpui::rgb(0xf54a45))))
+        };
+        let stroke_sq = |c: Col, none: bool| div().size(px(16.)).rounded(px(3.)).border_2().border_color(if none { t.border } else { c.hsla() });
+        // 代码绘图：编辑代码 | 标题 | 填充 · 边框
+        let lang = super::code::CodeLang::from_u8(e.code_lang);
+        let has_title = !e.text.is_empty();
+        bar = bar
+            .child(
+                self.bar_btn("sb-code", if lang == super::code::CodeLang::Mermaid { "编辑 Mermaid 代码" } else { "编辑 PlantUML 代码" }, false, t)
+                    .child(icon("square-code", 17., t.text))
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        if let Some(id) = this.single().map(|e| e.id) {
+                            this.open_code(Some(id), lang, w, cx);
+                        }
+                    })),
+            )
+            .child(sep())
+            .child(
+                self.bar_btn("sb-ctitle", if has_title { "隐藏标题" } else { "添加标题" }, has_title, t)
+                    .child(icon("square-type", 17., if has_title { t.accent } else { t.text }))
+                    .on_click(cx.listener(|this, _, w, cx| this.code_title(w, cx))),
+            )
+            .child(sep())
+            .child(self.drop_btn(
+                "sb-fill",
+                "填充",
+                Popover::Fill,
+                fill_dot(e.fill).relative().flex().items_center().justify_center().into_any_element(),
+                t,
+                cx,
+            ))
+            .child(self.drop_btn("sb-border", "边框", Popover::Border, stroke_sq(e.stroke, e.no_stroke).into_any_element(), t, cx));
+        bar
     }
 
     // ───────────── 下拉面板 ─────────────
@@ -863,240 +884,11 @@ impl BoardEditor {
                     .when(!cell && cur.is_some(), |d| d.child(self.alpha_slider(false, alpha, t, cx)))
                     .into_any_element()
             }
-            Popover::Border => {
-                let e = first.clone();
-                let cur = e.as_ref().map(|e| e.stroke);
-                let is_box = e.as_ref().is_some_and(|e| matches!(e.kind, ElKind::Shape(_) | ElKind::Section | ElKind::Table { .. }));
-                let style = e
-                    .as_ref()
-                    .map(|e| {
-                        if e.no_stroke {
-                            0
-                        } else if e.dotted {
-                            3
-                        } else if e.dash {
-                            2
-                        } else {
-                            1
-                        }
-                    })
-                    .unwrap_or(1);
-                let sw = e.as_ref().map(|e| e.stroke_w).unwrap_or(1.8);
-                let alpha = cur.map(|c| c.alpha()).unwrap_or(1.);
-                // 分段按钮组（浅灰底，选中项白底蓝字）
-                let seg = |children: Vec<AnyElement>| div().flex().p(px(2.)).gap(px(2.)).rounded(px(6.)).bg(t.hover).children(children);
-                let seg_btn = |id: (&'static str, usize), on: bool, tip: &'static str| {
-                    div()
-                        .id(id)
-                        .flex_1()
-                        .h(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(t.accent_soft))
-                        .hover(|s| s.bg(t.bg))
-                        .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
-                };
-                let line_glyph = |s: u8, on: bool| {
-                    let c = if on { t.accent } else { t.text };
-                    match s {
-                        0 => icon("ban", 15., c).into_any_element(),
-                        1 => div().w(px(18.)).h(px(2.)).bg(c).into_any_element(),
-                        2 => div().flex().gap(px(3.)).children((0..3).map(|_| div().w(px(4.)).h(px(2.)).bg(c))).into_any_element(),
-                        _ => div().flex().gap(px(2.)).children((0..5).map(|_| div().w(px(2.)).h(px(2.)).bg(c))).into_any_element(),
-                    }
-                };
-                div()
-                    .w(px(6. * 30.))
-                    .when(is_box, |d| {
-                        d.child(title("边框样式"))
-                            .child(seg([(0u8, "无边框"), (1, "实线"), (2, "虚线"), (3, "点线")]
-                                .into_iter()
-                                .map(|(s, tip)| {
-                                    seg_btn(("pbs", s as usize), style == s, tip)
-                                        .child(line_glyph(s, style == s))
-                                        .on_click(cx.listener(move |this, _, _, cx| this.set_line_style(s, cx)))
-                                        .into_any_element()
-                                })
-                                .collect()))
-                            .child(div().h(px(6.)))
-                            .child(seg([(1.0f32, "细"), (1.8, "标准"), (3., "粗"), (4.5, "特粗")]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, (w, tip))| {
-                                    let on = (sw - w).abs() < 0.3;
-                                    seg_btn(("pbw", i), on, tip)
-                                        .child(div().size(px(3. + i as f32 * 1.6)).rounded_full().bg(if on { t.accent } else { t.text }))
-                                        .on_click(cx.listener(move |this, _, _, cx| this.set_stroke_w(w, cx)))
-                                        .into_any_element()
-                                })
-                                .collect()))
-                            .child(div().h(px(1.)).my(px(10.)).bg(t.border))
-                    })
-                    .child(self.color_grid(
-                        "psc",
-                        STROKE_COLORS.iter().map(|c| Some(*c)).collect(),
-                        6,
-                        cur,
-                        t,
-                        move |this, c, cx| {
-                            if let Some(c) = c {
-                                this.set_stroke(c, cx)
-                            }
-                        },
-                        cx,
-                    ))
-                    .child(self.alpha_slider(true, alpha, t, cx))
-                    .into_any_element()
-            }
-            Popover::TextColor => {
-                let cur = first.as_ref().map(|e| self.shown_fmt(e, cx).2.unwrap_or(Col::rgb(0x1f2329)));
-                // 一排带颜色的「A」
-                div()
-                    .child(title("文字颜色"))
-                    .child(div().flex().flex_wrap().gap(px(6.)).w(px(6. * 30.)).children(TEXT_COLORS.iter().enumerate().map(|(i, c)| {
-                        let col = Col::rgb(*c);
-                        let on = cur.is_some_and(|x| x.0 | 0xff == col.0 | 0xff);
-                        div()
-                            .id(("ptc", i))
-                            .size(px(24.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .border_1()
-                            .border_color(if on { t.accent } else { t.border })
-                            .when(on, |d| d.border_2())
-                            .when(*c == 0xffffff, |d| d.bg(gpui::rgb(0x8f959e)))
-                            .hover(|s| s.border_color(t.accent))
-                            .text_size(px(14.))
-                            .text_color(col.hsla())
-                            .child("A")
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_text_color(col, cx)))
-                    })))
-                    .into_any_element()
-            }
-            Popover::FontSize => {
-                let e = first.clone();
-                let sticky = e.as_ref().is_some_and(|e| matches!(e.kind, ElKind::Sticky));
-                let cur = e.as_ref().map(|e| if e.auto_font && sticky { 0. } else { self.shown_layout(e).0 }).unwrap_or(16.);
-                let row = |i: usize, label: String, v: Option<f32>, on: bool| {
-                    div()
-                        .id(("pfs", i))
-                        .h(px(30.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .rounded(px(5.))
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .when(on, |d| d.text_color(t.accent))
-                        .hover(|s| s.bg(t.hover))
-                        .child(label)
-                        .when(on, |d| d.child(icon("check", 13., t.accent)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.popover = None;
-                            this.set_font(v, cx)
-                        }))
-                };
-                div()
-                    .w(px(76.))
-                    .when(sticky, |d| d.child(row(99, "自动".into(), None, cur == 0.)))
-                    .children(FONT_SIZES.iter().enumerate().map(|(i, s)| row(i, format!("{s:.0}"), Some(*s), (cur - s).abs() < 0.5)))
-                    .into_any_element()
-            }
-            Popover::Align => {
-                // 文本格式（「A≡」）：加粗 / 删除线 / 下划线 / 斜体，水平对齐，垂直对齐
-                let e = first.clone();
-                let (_, h, v) = e.as_ref().map(|e| self.shown_layout(e)).unwrap_or((16., 1, 1));
-                let (bold, deco, _) = e.as_ref().map(|e| self.shown_fmt(e, cx)).unwrap_or_default();
-                let btn = |id: (&'static str, usize), ic: &'static str, tip: &'static str, on: bool| {
-                    div()
-                        .id(id)
-                        .flex_1()
-                        .h(px(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(t.accent_soft))
-                        .hover(|s| s.bg(t.hover))
-                        .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
-                        .child(icon(ic, 16., if on { t.accent } else { t.text }))
-                };
-                let sep = || div().h(px(1.)).my(px(6.)).bg(t.border);
-                div()
-                    .w(px(180.))
-                    .child(
-                        div()
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(2.))
-                                    .child(btn(("pfmt", 0), "bold", "加粗 ⌘B", bold).on_click(cx.listener(|this, _, _, cx| this.toggle_bold(cx))))
-                                    .child(
-                                        btn(("pfmt", 1), "strikethrough", "删除线 ⌘⇧X", deco & DECO_STRIKE != 0)
-                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_STRIKE, cx))),
-                                    )
-                                    .child(
-                                        btn(("pfmt", 2), "underline", "下划线 ⌘U", deco & DECO_UNDERLINE != 0)
-                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_UNDERLINE, cx))),
-                                    )
-                                    .child(
-                                        btn(("pfmt", 3), "italic", "斜体 ⌘I", deco & DECO_ITALIC != 0)
-                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_ITALIC, cx))),
-                                    ),
-                            )
-                            .child(sep()),
-                    )
-                    .child(div().flex().gap(px(2.)).children(
-                        [(1u8, "text-left", "左对齐"), (2, "text-center", "水平居中"), (3, "text-right", "右对齐")].into_iter().map(|(a, ic, tip)| {
-                            btn(("pal", a as usize), ic, tip, h + 1 == a).on_click(cx.listener(move |this, _, _, cx| this.set_text_align(a, cx)))
-                        }),
-                    ))
-                    .child(div().h(px(2.)))
-                    .child(div().flex().gap(px(2.)).children(
-                        [(1u8, "arrow-up-to-line", "顶部对齐"), (2, "fold-vertical", "垂直居中"), (3, "arrow-down-to-line", "底部对齐")].into_iter().map(
-                            |(a, ic, tip)| btn(("pva", a as usize), ic, tip, v + 1 == a).on_click(cx.listener(move |this, _, _, cx| this.set_v_align(a, cx))),
-                        ),
-                    ))
-                    .into_any_element()
-            }
-            Popover::Route => {
-                let cur = match first.as_ref().map(|e| &e.kind) {
-                    Some(ElKind::Connector { route, .. }) => *route,
-                    _ => Route::Straight,
-                };
-                div()
-                    .w(px(150.))
-                    .children(ROUTES.into_iter().enumerate().map(|(i, (r, ic, name))| {
-                        let on = cur == r;
-                        div()
-                            .id(("prt", i))
-                            .h(px(32.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .when(on, |d| d.bg(t.accent_soft).text_color(t.accent))
-                            .hover(|s| s.bg(t.hover))
-                            .child(icon(ic, 16., if on { t.accent } else { t.text }))
-                            .child(name)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.popover = None;
-                                this.set_route(r, cx)
-                            }))
-                    }))
-                    .into_any_element()
-            }
+            Popover::Border => self.render_popover_border(t, cx),
+            Popover::TextColor => self.render_popover_text_color(t, cx),
+            Popover::FontSize => self.render_popover_font_size(t, cx),
+            Popover::Align => self.render_popover_align(t, cx),
+            Popover::Route => self.render_popover_route(t, cx),
             Popover::StartArrow | Popover::EndArrow => {
                 let is_end = pop == Popover::EndArrow;
                 let cur = match first.as_ref().map(|e| &e.kind) {
@@ -1164,86 +956,7 @@ impl BoardEditor {
                     })
                     .into_any_element()
             }
-            Popover::LineStyle if first.as_ref().is_some_and(|e| e.is_connector()) => {
-                // 连线样式：连线类型 / 线型 / 粗细 / 跨线
-                let e = first.clone().unwrap();
-                let route = match &e.kind {
-                    ElKind::Connector { route, .. } => *route,
-                    _ => Route::Straight,
-                };
-                let style = if e.dotted {
-                    3
-                } else if e.dash {
-                    2
-                } else {
-                    1
-                };
-                let cell = |id: (&'static str, usize), on: bool| {
-                    div()
-                        .id(id)
-                        .flex_1()
-                        .h(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(t.accent_soft))
-                        .hover(|s| s.bg(t.hover))
-                };
-                let row = || div().flex().gap(px(4.)).pb(px(8.));
-                div()
-                    .w(px(196.))
-                    .child(title("连线样式"))
-                    .child(row().children(ROUTES.iter().enumerate().map(|(i, (r, ic, tip))| {
-                        let r = *r;
-                        let on = route == r;
-                        cell(("pcr", i), on)
-                            .tooltip(move |_, cx| cx.new(|_| Tooltip((*tip).into())).into())
-                            .child(icon(ic, 16., if on { t.accent } else { t.text }))
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_route(r, cx)))
-                    })))
-                    .child(row().children([(1u8, false, false), (2, true, false), (3, false, true)].into_iter().map(|(s, dash, dot)| {
-                        let on = style == s;
-                        let mut l = LineItem::new(vec![pt(2., 9.), pt(30., 9.)]);
-                        l.stroke = Col::from_hsla(if on { t.accent } else { t.text });
-                        l.width = 2.;
-                        l.end = Arrow::None;
-                        l.dash = dash;
-                        l.dotted = dot;
-                        let scene = Arc::new(Scene { items: vec![Item::Line(l)], width: 32., height: 18., ..Default::default() });
-                        cell(("pcs", s as usize), on)
-                            .child(div().w(px(32.)).h(px(18.)).child(
-                                canvas(|b, _, _| b, move |b, _, win, cx| paint_scene(&scene, View { origin: b.origin, scale: 1. }, b, win, cx)).size_full(),
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_line_style(s, cx)))
-                    })))
-                    .child(row().children([1.0f32, 1.8, 3., 4.5].into_iter().enumerate().map(|(i, w)| {
-                        let on = (e.stroke_w - w).abs() < 0.3;
-                        let d = w + 3.;
-                        cell(("pcw", i), on)
-                            .child(div().size(px(d)).rounded_full().bg(if on { t.accent } else { t.text }))
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_stroke_w(w, cx)))
-                    })))
-                    .child(
-                        // 跨线（交叉处画小拱桥）暂未支持
-                        div()
-                            .id("pc-jump")
-                            .h(px(28.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(4.))
-                            .rounded(px(5.))
-                            .bg(t.hover)
-                            .opacity(0.45)
-                            .text_size(px(12.))
-                            .tooltip(|_, cx| cx.new(|_| Tooltip("跨线（即将支持）".into())).into())
-                            .child(icon("line-jump", 15., t.text))
-                            .child("跨线"),
-                    )
-                    .into_any_element()
-            }
+            Popover::LineStyle if first.as_ref().is_some_and(|e| e.is_connector()) => self.render_popover_line_style(t, cx),
             Popover::LineStyle => {
                 let e = first.clone();
                 let style = e
@@ -1323,164 +1036,11 @@ impl BoardEditor {
                     }))
                     .into_any_element()
             }
-            Popover::Arrange => {
-                let cell = |id: usize, ic: &'static str, tip: &'static str, f: fn(&mut Self, &mut Context<Self>)| {
-                    div()
-                        .id(("parr", id))
-                        .size(px(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(t.hover))
-                        .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
-                        .child(icon(ic, 17., t.text))
-                        .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
-                };
-                div()
-                    .child(title("对齐"))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(2.))
-                            .child(cell(0, "align-h-left", "左对齐", |this, cx| this.align("left", cx)))
-                            .child(cell(1, "align-h-mid", "水平居中", |this, cx| this.align("hcenter", cx)))
-                            .child(cell(2, "align-h-right", "右对齐", |this, cx| this.align("right", cx)))
-                            .child(cell(3, "align-v-top", "顶对齐", |this, cx| this.align("top", cx)))
-                            .child(cell(4, "align-v-mid", "垂直居中", |this, cx| this.align("vcenter", cx)))
-                            .child(cell(5, "align-v-bottom", "底对齐", |this, cx| this.align("bottom", cx))),
-                    )
-                    .child(div().pt(px(8.)).child(title("分布与批量排版")))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(2.))
-                            .child(cell(6, "columns", "水平等间距", |this, cx| this.distribute(true, cx)))
-                            .child(cell(7, "list", "垂直等间距", |this, cx| this.distribute(false, cx)))
-                            .child(cell(8, "same-size", "等宽", |this, cx| this.same_size(true, false, cx)))
-                            .child(cell(9, "align-v-mid", "等高", |this, cx| this.same_size(false, true, cx)))
-                            .child(cell(10, "maximize", "相同大小", |this, cx| this.same_size(true, true, cx))),
-                    )
-                    .into_any_element()
-            }
+            Popover::Arrange => self.render_popover_arrange(t, cx),
             Popover::More => self.menu_items(true, t, cx).into_any_element(),
-            Popover::TableOps => {
-                let lane = first.as_ref().is_some_and(|e| e.is_lane());
-                let has_cell = self.cur_cell().is_some();
-                let sep = || div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(t.border);
-                let r = |id: &'static str, label: &'static str, how: u8| {
-                    self.menu_row(id, label, "", false, t).on_click(cx.listener(move |this, _, _, cx| this.table_insert(how, cx)))
-                };
-                div()
-                    .w(px(200.))
-                    .py(px(4.))
-                    .child(r("pt-up", if lane { "在上方插入一行" } else { "在上方插入行" }, 0))
-                    .child(r("pt-down", if lane { "在下方插入一行" } else { "在下方插入行" }, 1))
-                    .child(r("pt-left", "在左侧插入列", 2))
-                    .child(r("pt-right", "在右侧插入列", 3))
-                    .child(sep())
-                    .child(
-                        self.menu_row("pt-delr", "删除所在行", "", true, t)
-                            .when(!has_cell, |d| d.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.table_delete(true, cx))),
-                    )
-                    .child(
-                        self.menu_row("pt-delc", "删除所在列", "", true, t)
-                            .when(!has_cell, |d| d.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.table_delete(false, cx))),
-                    )
-                    .when(!has_cell, |d| d.child(div().px(px(14.)).py(px(4.)).text_size(px(11.5)).text_color(t.text_muted).child("先单击选中一个单元格")))
-                    .into_any_element()
-            }
-            Popover::MindLayout => {
-                let (layout, branch) = first.as_ref().map(|e| self.doc.mind_root_style_pub(e.id)).unwrap_or((0, 0));
-                let opt = |id: (&'static str, usize), ic: &'static str, label: &'static str, on: bool| {
-                    div()
-                        .id(id)
-                        .h(px(32.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .when(on, |d| d.bg(t.accent_soft).text_color(t.accent))
-                        .hover(|s| s.bg(t.hover))
-                        .child(icon(ic, 16., if on { t.accent } else { t.text }))
-                        .child(label)
-                };
-                div()
-                    .w(px(2. * 92. + 8.))
-                    .child(div().id("pml-scroll").max_h(px(330.)).overflow_y_scroll().child(self.mind_layout_cards(
-                        "pml",
-                        Some(layout),
-                        t,
-                        cx,
-                        |this, k, cx| this.mind_set_layout(k, cx),
-                    )))
-                    .child(div().pt(px(8.)).child(title("分支线")))
-                    .child(opt(("pmb", 0), "conn-curve", "曲线", branch == 0).on_click(cx.listener(|this, _, _, cx| this.mind_set_branch(0, cx))))
-                    .child(opt(("pmb", 1), "conn-elbow", "直角", branch == 1).on_click(cx.listener(|this, _, _, cx| this.mind_set_branch(1, cx))))
-                    .into_any_element()
-            }
-            Popover::Settings => {
-                let p = prefs();
-                let toggle = |id: &'static str, label: &'static str, key: &'static str, on: bool, f: fn(&mut BoardPrefs)| {
-                    div()
-                        .id(id)
-                        .h(px(34.))
-                        .px(px(10.))
-                        .mx(px(4.))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .hover(|s| s.bg(t.hover))
-                        .child(div().flex_1().child(label))
-                        .child(div().text_size(px(12.)).text_color(t.text_muted).child(key))
-                        .child(
-                            div()
-                                .w(px(30.))
-                                .h(px(18.))
-                                .rounded_full()
-                                .bg(if on { t.accent } else { t.border_strong })
-                                .flex()
-                                .items_center()
-                                .px(px(2.))
-                                .when(on, |d| d.justify_end())
-                                .child(div().size(px(14.)).rounded_full().bg(gpui::white())),
-                        )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            f(&mut PREFS.lock().unwrap());
-                            cx.notify();
-                        }))
-                };
-                div()
-                    .w(px(250.))
-                    .py(px(4.))
-                    .child(toggle("ps-grid", "网格背景", "⇧G", p.grid, |p| p.grid = !p.grid))
-                    .child(toggle("ps-quick", "快捷创建", "⇧Q", p.quick_create, |p| p.quick_create = !p.quick_create))
-                    .child(toggle("ps-size", "显示尺寸", "", p.show_size, |p| p.show_size = !p.show_size))
-                    .child(toggle("ps-precise", "精准框选", "", p.precise_select, |p| p.precise_select = !p.precise_select))
-                    .child(toggle("ps-map", "小地图", "", p.minimap, |p| p.minimap = !p.minimap))
-                    .when(self.doc.flow, |d| {
-                        d.child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(t.border)).child(self.menu_row("ps-layout", "自动整理布局", "", false, t).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.popover = None;
-                                this.snapshot();
-                                super::auto_layout(&mut this.doc);
-                                this.commit(cx);
-                                let b = this.doc.bounds();
-                                this.zoom_to(b);
-                            }),
-                        ))
-                    })
-                    .into_any_element()
-            }
+            Popover::TableOps => self.render_popover_table_ops(t, cx),
+            Popover::MindLayout => self.render_popover_mind_layout(t, cx),
+            Popover::Settings => self.render_popover_settings(t, cx),
             Popover::Export => div()
                 .w(px(200.))
                 .py(px(4.))
@@ -1547,6 +1107,525 @@ impl BoardEditor {
             .with_priority(3)
             .into_any_element(),
         )
+    }
+    /// 从 `render_popover` 拆出。
+    fn render_popover_text_color(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+        let title = |s: &'static str| div().pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(s);
+
+        let cur = first.as_ref().map(|e| self.shown_fmt(e, cx).2.unwrap_or(Col::rgb(0x1f2329)));
+        // 一排带颜色的「A」
+        div()
+            .child(title("文字颜色"))
+            .child(div().flex().flex_wrap().gap(px(6.)).w(px(6. * 30.)).children(TEXT_COLORS.iter().enumerate().map(|(i, c)| {
+                let col = Col::rgb(*c);
+                let on = cur.is_some_and(|x| x.0 | 0xff == col.0 | 0xff);
+                div()
+                    .id(("ptc", i))
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if on { t.accent } else { t.border })
+                    .when(on, |d| d.border_2())
+                    .when(*c == 0xffffff, |d| d.bg(gpui::rgb(0x8f959e)))
+                    .hover(|s| s.border_color(t.accent))
+                    .text_size(px(14.))
+                    .text_color(col.hsla())
+                    .child("A")
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_text_color(col, cx)))
+            })))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_mind_layout(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+        let title = |s: &'static str| div().pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(s);
+
+        let (layout, branch) = first.as_ref().map(|e| self.doc.mind_root_style_pub(e.id)).unwrap_or((0, 0));
+        let opt = |id: (&'static str, usize), ic: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .h(px(32.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when(on, |d| d.bg(t.accent_soft).text_color(t.accent))
+                .hover(|s| s.bg(t.hover))
+                .child(icon(ic, 16., if on { t.accent } else { t.text }))
+                .child(label)
+        };
+        div()
+            .w(px(2. * 92. + 8.))
+            .child(
+                div()
+                    .id("pml-scroll")
+                    .max_h(px(330.))
+                    .overflow_y_scroll()
+                    .child(self.mind_layout_cards("pml", Some(layout), t, cx, |this, k, cx| this.mind_set_layout(k, cx))),
+            )
+            .child(div().pt(px(8.)).child(title("分支线")))
+            .child(opt(("pmb", 0), "conn-curve", "曲线", branch == 0).on_click(cx.listener(|this, _, _, cx| this.mind_set_branch(0, cx))))
+            .child(opt(("pmb", 1), "conn-elbow", "直角", branch == 1).on_click(cx.listener(|this, _, _, cx| this.mind_set_branch(1, cx))))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_arrange(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let title = |s: &'static str| div().pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(s);
+
+        let cell = |id: usize, ic: &'static str, tip: &'static str, f: fn(&mut Self, &mut Context<Self>)| {
+            div()
+                .id(("parr", id))
+                .size(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover))
+                .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
+                .child(icon(ic, 17., t.text))
+                .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+        };
+        div()
+            .child(title("对齐"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(2.))
+                    .child(cell(0, "align-h-left", "左对齐", |this, cx| this.align("left", cx)))
+                    .child(cell(1, "align-h-mid", "水平居中", |this, cx| this.align("hcenter", cx)))
+                    .child(cell(2, "align-h-right", "右对齐", |this, cx| this.align("right", cx)))
+                    .child(cell(3, "align-v-top", "顶对齐", |this, cx| this.align("top", cx)))
+                    .child(cell(4, "align-v-mid", "垂直居中", |this, cx| this.align("vcenter", cx)))
+                    .child(cell(5, "align-v-bottom", "底对齐", |this, cx| this.align("bottom", cx))),
+            )
+            .child(div().pt(px(8.)).child(title("分布与批量排版")))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(2.))
+                    .child(cell(6, "columns", "水平等间距", |this, cx| this.distribute(true, cx)))
+                    .child(cell(7, "list", "垂直等间距", |this, cx| this.distribute(false, cx)))
+                    .child(cell(8, "same-size", "等宽", |this, cx| this.same_size(true, false, cx)))
+                    .child(cell(9, "align-v-mid", "等高", |this, cx| this.same_size(false, true, cx)))
+                    .child(cell(10, "maximize", "相同大小", |this, cx| this.same_size(true, true, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_line_style(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+        let title = |s: &'static str| div().pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(s);
+
+        // 连线样式：连线类型 / 线型 / 粗细 / 跨线
+        let e = first.clone().unwrap();
+        let route = match &e.kind {
+            ElKind::Connector { route, .. } => *route,
+            _ => Route::Straight,
+        };
+        let style = if e.dotted {
+            3
+        } else if e.dash {
+            2
+        } else {
+            1
+        };
+        let cell = |id: (&'static str, usize), on: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(t.accent_soft))
+                .hover(|s| s.bg(t.hover))
+        };
+        let row = || div().flex().gap(px(4.)).pb(px(8.));
+        div()
+            .w(px(196.))
+            .child(title("连线样式"))
+            .child(row().children(ROUTES.iter().enumerate().map(|(i, (r, ic, tip))| {
+                let r = *r;
+                let on = route == r;
+                cell(("pcr", i), on)
+                    .tooltip(move |_, cx| cx.new(|_| Tooltip((*tip).into())).into())
+                    .child(icon(ic, 16., if on { t.accent } else { t.text }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_route(r, cx)))
+            })))
+            .child(row().children([(1u8, false, false), (2, true, false), (3, false, true)].into_iter().map(|(s, dash, dot)| {
+                let on = style == s;
+                let mut l = LineItem::new(vec![pt(2., 9.), pt(30., 9.)]);
+                l.stroke = Col::from_hsla(if on { t.accent } else { t.text });
+                l.width = 2.;
+                l.end = Arrow::None;
+                l.dash = dash;
+                l.dotted = dot;
+                let scene = Arc::new(Scene { items: vec![Item::Line(l)], width: 32., height: 18., ..Default::default() });
+                cell(("pcs", s as usize), on)
+                    .child(
+                        div()
+                            .w(px(32.))
+                            .h(px(18.))
+                            .child(canvas(|b, _, _| b, move |b, _, win, cx| paint_scene(&scene, View { origin: b.origin, scale: 1. }, b, win, cx)).size_full()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_line_style(s, cx)))
+            })))
+            .child(row().children([1.0f32, 1.8, 3., 4.5].into_iter().enumerate().map(|(i, w)| {
+                let on = (e.stroke_w - w).abs() < 0.3;
+                let d = w + 3.;
+                cell(("pcw", i), on)
+                    .child(div().size(px(d)).rounded_full().bg(if on { t.accent } else { t.text }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_stroke_w(w, cx)))
+            })))
+            .child(
+                // 跨线（交叉处画小拱桥）暂未支持
+                div()
+                    .id("pc-jump")
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .rounded(px(5.))
+                    .bg(t.hover)
+                    .opacity(0.45)
+                    .text_size(px(12.))
+                    .tooltip(|_, cx| cx.new(|_| Tooltip("跨线（即将支持）".into())).into())
+                    .child(icon("line-jump", 15., t.text))
+                    .child("跨线"),
+            )
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_border(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+        let title = |s: &'static str| div().pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(s);
+
+        let e = first.clone();
+        let cur = e.as_ref().map(|e| e.stroke);
+        let is_box = e.as_ref().is_some_and(|e| matches!(e.kind, ElKind::Shape(_) | ElKind::Section | ElKind::Table { .. }));
+        let style = e
+            .as_ref()
+            .map(|e| {
+                if e.no_stroke {
+                    0
+                } else if e.dotted {
+                    3
+                } else if e.dash {
+                    2
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1);
+        let sw = e.as_ref().map(|e| e.stroke_w).unwrap_or(1.8);
+        let alpha = cur.map(|c| c.alpha()).unwrap_or(1.);
+        // 分段按钮组（浅灰底，选中项白底蓝字）
+        let seg = |children: Vec<AnyElement>| div().flex().p(px(2.)).gap(px(2.)).rounded(px(6.)).bg(t.hover).children(children);
+        let seg_btn = |id: (&'static str, usize), on: bool, tip: &'static str| {
+            div()
+                .id(id)
+                .flex_1()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(t.accent_soft))
+                .hover(|s| s.bg(t.bg))
+                .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
+        };
+        let line_glyph = |s: u8, on: bool| {
+            let c = if on { t.accent } else { t.text };
+            match s {
+                0 => icon("ban", 15., c).into_any_element(),
+                1 => div().w(px(18.)).h(px(2.)).bg(c).into_any_element(),
+                2 => div().flex().gap(px(3.)).children((0..3).map(|_| div().w(px(4.)).h(px(2.)).bg(c))).into_any_element(),
+                _ => div().flex().gap(px(2.)).children((0..5).map(|_| div().w(px(2.)).h(px(2.)).bg(c))).into_any_element(),
+            }
+        };
+        div()
+            .w(px(6. * 30.))
+            .when(is_box, |d| {
+                d.child(title("边框样式"))
+                    .child(seg([(0u8, "无边框"), (1, "实线"), (2, "虚线"), (3, "点线")]
+                        .into_iter()
+                        .map(|(s, tip)| {
+                            seg_btn(("pbs", s as usize), style == s, tip)
+                                .child(line_glyph(s, style == s))
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_line_style(s, cx)))
+                                .into_any_element()
+                        })
+                        .collect()))
+                    .child(div().h(px(6.)))
+                    .child(seg([(1.0f32, "细"), (1.8, "标准"), (3., "粗"), (4.5, "特粗")]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (w, tip))| {
+                            let on = (sw - w).abs() < 0.3;
+                            seg_btn(("pbw", i), on, tip)
+                                .child(div().size(px(3. + i as f32 * 1.6)).rounded_full().bg(if on { t.accent } else { t.text }))
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_stroke_w(w, cx)))
+                                .into_any_element()
+                        })
+                        .collect()))
+                    .child(div().h(px(1.)).my(px(10.)).bg(t.border))
+            })
+            .child(self.color_grid(
+                "psc",
+                STROKE_COLORS.iter().map(|c| Some(*c)).collect(),
+                6,
+                cur,
+                t,
+                move |this, c, cx| {
+                    if let Some(c) = c {
+                        this.set_stroke(c, cx)
+                    }
+                },
+                cx,
+            ))
+            .child(self.alpha_slider(true, alpha, t, cx))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_route(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+
+        let cur = match first.as_ref().map(|e| &e.kind) {
+            Some(ElKind::Connector { route, .. }) => *route,
+            _ => Route::Straight,
+        };
+        div()
+            .w(px(150.))
+            .children(ROUTES.into_iter().enumerate().map(|(i, (r, ic, name))| {
+                let on = cur == r;
+                div()
+                    .id(("prt", i))
+                    .h(px(32.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .when(on, |d| d.bg(t.accent_soft).text_color(t.accent))
+                    .hover(|s| s.bg(t.hover))
+                    .child(icon(ic, 16., if on { t.accent } else { t.text }))
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.popover = None;
+                        this.set_route(r, cx)
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_font_size(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+
+        let e = first.clone();
+        let sticky = e.as_ref().is_some_and(|e| matches!(e.kind, ElKind::Sticky));
+        let cur = e.as_ref().map(|e| if e.auto_font && sticky { 0. } else { self.shown_layout(e).0 }).unwrap_or(16.);
+        let row = |i: usize, label: String, v: Option<f32>, on: bool| {
+            div()
+                .id(("pfs", i))
+                .h(px(30.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when(on, |d| d.text_color(t.accent))
+                .hover(|s| s.bg(t.hover))
+                .child(label)
+                .when(on, |d| d.child(icon("check", 13., t.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.popover = None;
+                    this.set_font(v, cx)
+                }))
+        };
+        div()
+            .w(px(76.))
+            .when(sticky, |d| d.child(row(99, "自动".into(), None, cur == 0.)))
+            .children(FONT_SIZES.iter().enumerate().map(|(i, s)| row(i, format!("{s:.0}"), Some(*s), (cur - s).abs() < 0.5)))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_table_ops(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+
+        let lane = first.as_ref().is_some_and(|e| e.is_lane());
+        let has_cell = self.cur_cell().is_some();
+        let sep = || div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(t.border);
+        let r = |id: &'static str, label: &'static str, how: u8| {
+            self.menu_row(id, label, "", false, t).on_click(cx.listener(move |this, _, _, cx| this.table_insert(how, cx)))
+        };
+        div()
+            .w(px(200.))
+            .py(px(4.))
+            .child(r("pt-up", if lane { "在上方插入一行" } else { "在上方插入行" }, 0))
+            .child(r("pt-down", if lane { "在下方插入一行" } else { "在下方插入行" }, 1))
+            .child(r("pt-left", "在左侧插入列", 2))
+            .child(r("pt-right", "在右侧插入列", 3))
+            .child(sep())
+            .child(
+                self.menu_row("pt-delr", "删除所在行", "", true, t)
+                    .when(!has_cell, |d| d.opacity(0.4))
+                    .on_click(cx.listener(|this, _, _, cx| this.table_delete(true, cx))),
+            )
+            .child(
+                self.menu_row("pt-delc", "删除所在列", "", true, t)
+                    .when(!has_cell, |d| d.opacity(0.4))
+                    .on_click(cx.listener(|this, _, _, cx| this.table_delete(false, cx))),
+            )
+            .when(!has_cell, |d| d.child(div().px(px(14.)).py(px(4.)).text_size(px(11.5)).text_color(t.text_muted).child("先单击选中一个单元格")))
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_settings(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let p = prefs();
+        let toggle = |id: &'static str, label: &'static str, key: &'static str, on: bool, f: fn(&mut BoardPrefs)| {
+            div()
+                .id(id)
+                .h(px(34.))
+                .px(px(10.))
+                .mx(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .hover(|s| s.bg(t.hover))
+                .child(div().flex_1().child(label))
+                .child(div().text_size(px(12.)).text_color(t.text_muted).child(key))
+                .child(
+                    div()
+                        .w(px(30.))
+                        .h(px(18.))
+                        .rounded_full()
+                        .bg(if on { t.accent } else { t.border_strong })
+                        .flex()
+                        .items_center()
+                        .px(px(2.))
+                        .when(on, |d| d.justify_end())
+                        .child(div().size(px(14.)).rounded_full().bg(gpui::white())),
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    f(&mut PREFS.lock().unwrap());
+                    cx.notify();
+                }))
+        };
+        div()
+            .w(px(250.))
+            .py(px(4.))
+            .child(toggle("ps-grid", "网格背景", "⇧G", p.grid, |p| p.grid = !p.grid))
+            .child(toggle("ps-quick", "快捷创建", "⇧Q", p.quick_create, |p| p.quick_create = !p.quick_create))
+            .child(toggle("ps-size", "显示尺寸", "", p.show_size, |p| p.show_size = !p.show_size))
+            .child(toggle("ps-precise", "精准框选", "", p.precise_select, |p| p.precise_select = !p.precise_select))
+            .child(toggle("ps-map", "小地图", "", p.minimap, |p| p.minimap = !p.minimap))
+            .when(self.doc.flow, |d| {
+                d.child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(t.border)).child(self.menu_row("ps-layout", "自动整理布局", "", false, t).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.popover = None;
+                        this.snapshot();
+                        super::auto_layout(&mut this.doc);
+                        this.commit(cx);
+                        let b = this.doc.bounds();
+                        this.zoom_to(b);
+                    }),
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// 从 `render_popover` 拆出。
+    fn render_popover_align(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let first = self.first_sel().cloned();
+
+        // 文本格式（「A≡」）：加粗 / 删除线 / 下划线 / 斜体，水平对齐，垂直对齐
+        let e = first.clone();
+        let (_, h, v) = e.as_ref().map(|e| self.shown_layout(e)).unwrap_or((16., 1, 1));
+        let (bold, deco, _) = e.as_ref().map(|e| self.shown_fmt(e, cx)).unwrap_or_default();
+        let btn = |id: (&'static str, usize), ic: &'static str, tip: &'static str, on: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(t.accent_soft))
+                .hover(|s| s.bg(t.hover))
+                .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
+                .child(icon(ic, 16., if on { t.accent } else { t.text }))
+        };
+        let sep = || div().h(px(1.)).my(px(6.)).bg(t.border);
+        div()
+            .w(px(180.))
+            .child(
+                div()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .child(btn(("pfmt", 0), "bold", "加粗 ⌘B", bold).on_click(cx.listener(|this, _, _, cx| this.toggle_bold(cx))))
+                            .child(
+                                btn(("pfmt", 1), "strikethrough", "删除线 ⌘⇧X", deco & DECO_STRIKE != 0)
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_STRIKE, cx))),
+                            )
+                            .child(
+                                btn(("pfmt", 2), "underline", "下划线 ⌘U", deco & DECO_UNDERLINE != 0)
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_UNDERLINE, cx))),
+                            )
+                            .child(
+                                btn(("pfmt", 3), "italic", "斜体 ⌘I", deco & DECO_ITALIC != 0)
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_deco(DECO_ITALIC, cx))),
+                            ),
+                    )
+                    .child(sep()),
+            )
+            .child(
+                div().flex().gap(px(2.)).children(
+                    [(1u8, "text-left", "左对齐"), (2, "text-center", "水平居中"), (3, "text-right", "右对齐")].into_iter().map(|(a, ic, tip)| {
+                        btn(("pal", a as usize), ic, tip, h + 1 == a).on_click(cx.listener(move |this, _, _, cx| this.set_text_align(a, cx)))
+                    }),
+                ),
+            )
+            .child(div().h(px(2.)))
+            .child(
+                div().flex().gap(px(2.)).children(
+                    [(1u8, "arrow-up-to-line", "顶部对齐"), (2, "fold-vertical", "垂直居中"), (3, "arrow-down-to-line", "底部对齐")]
+                        .into_iter()
+                        .map(|(a, ic, tip)| btn(("pva", a as usize), ic, tip, v + 1 == a).on_click(cx.listener(move |this, _, _, cx| this.set_v_align(a, cx)))),
+                ),
+            )
+            .into_any_element()
     }
 
     /// 右键菜单 / 「更多」里的操作。on_sel 为 false 时是画布空白处的菜单。

@@ -1519,111 +1519,10 @@ impl BaseEditor {
                 }
             }
             FieldType::Select | FieldType::MultiSelect | FieldType::Stage => {
-                let mut list = div().id("fe-opts").max_h(px(220.)).overflow_y_scroll().flex().flex_col().gap(px(6.));
-                for o in &prop.options {
-                    let inp = self.input(&format!("fd:opt:{}", o.id), "选项名称", &o.name, false, window, cx);
-                    let (oid, oid2) = (o.id.clone(), o.id.clone());
-                    let (bg, fg) = tag_color(o.color, t.dark);
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("oc-{oid}")))
-                                    .size(px(20.))
-                                    .flex_none()
-                                    .rounded(px(5.))
-                                    .bg(bg)
-                                    .border_1()
-                                    .border_color(fg.opacity(0.4))
-                                    .cursor_pointer()
-                                    .tooltip(tip("点击换颜色"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(o) = this.draft.as_mut().and_then(|d| d.prop.options.iter_mut().find(|o| o.id == oid)) {
-                                            o.color = (o.color + 1) % OPT_COLORS as u8;
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(input_box(t).flex_1().h(px(28.)).child(inp))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("od-{oid2}")))
-                                    .size(px(24.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(5.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(t.hover))
-                                    .child(icon("x", 13., t.text_muted))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(d) = this.draft.as_mut() {
-                                            d.prop.options.retain(|o| o.id != oid2);
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                }
-                body = body.child(label(if kind == FieldType::Stage { "流程节点（按顺序）" } else { "选项" })).child(list).child(
-                    div()
-                        .id("fe-optadd")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(13.))
-                        .text_color(t.accent)
-                        .cursor_pointer()
-                        .child(icon("plus", 14., t.accent))
-                        .child("添加选项")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(d) = this.draft.as_mut() {
-                                let n = d.prop.options.len();
-                                d.prop.options.push(SelOpt { id: new_id("opt"), name: format!("选项 {}", n + 1), color: (n % OPT_COLORS) as u8 });
-                            }
-                            cx.notify();
-                        })),
-                );
+                body = self.field_editor_select(t, window, cx, body, kind, &prop);
             }
             FieldType::Link | FieldType::DuplexLink => {
-                let tname = self.b().table(&prop.table).map(|t| t.meta.name.clone()).unwrap_or("请选择数据表".into());
-                let locked = editing.is_some() && kind == FieldType::DuplexLink;
-                body = body
-                    .child(label("关联的数据表"))
-                    .child(select_box("fe-lt", tname, Some("v-grid"), t).when(!locked, |d| {
-                        d.on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                let items =
-                                    this.b().table_list().iter().map(|t| PickItem::new(t.meta.id.clone(), t.meta.name.clone()).icon("v-grid")).collect();
-                                this.open_pick(PickTarget::LinkTable, items, vec![], false, ev.position, cx);
-                            }),
-                        )
-                    }))
-                    .child(
-                        div()
-                            .id("fe-single")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .cursor_pointer()
-                            .child(div().flex_1().text_size(px(13.)).child("只允许关联一条记录"))
-                            .child(switch(prop.single, t))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(d) = this.draft.as_mut() {
-                                    d.prop.single = !d.prop.single;
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .when(kind == FieldType::DuplexLink, |d| {
-                        d.child(div().text_size(px(12.)).text_color(t.text_muted).child("双向关联会在对方数据表自动新增一个回链字段，两边互相同步"))
-                    });
+                body = self.field_editor_link(t, cx, body, editing.clone(), kind, &prop);
             }
             FieldType::Lookup => {
                 body = body.child(self.lookup_editor(&prop, t, window, cx));
@@ -1699,6 +1598,119 @@ impl BaseEditor {
                     .child(primary_btn("fe-ok", "确定", t).on_click(cx.listener(|this, _, w, cx| this.save_draft(w, cx)))),
             )
             .into_any_element()
+    }
+    /// 从 `field_editor` 拆出。
+    fn field_editor_link(&self, t: &Theme, cx: &mut Context<Self>, mut body: Div, editing: Option<String>, kind: FieldType, prop: &Prop) -> Div {
+        let label = |s: &'static str| div().text_size(px(12.)).text_color(t.text_muted).child(s);
+        let tname = self.b().table(&prop.table).map(|t| t.meta.name.clone()).unwrap_or("请选择数据表".into());
+        let locked = editing.is_some() && kind == FieldType::DuplexLink;
+        body = body
+            .child(label("关联的数据表"))
+            .child(select_box("fe-lt", tname, Some("v-grid"), t).when(!locked, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                        let items = this.b().table_list().iter().map(|t| PickItem::new(t.meta.id.clone(), t.meta.name.clone()).icon("v-grid")).collect();
+                        this.open_pick(PickTarget::LinkTable, items, vec![], false, ev.position, cx);
+                    }),
+                )
+            }))
+            .child(
+                div()
+                    .id("fe-single")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .cursor_pointer()
+                    .child(div().flex_1().text_size(px(13.)).child("只允许关联一条记录"))
+                    .child(switch(prop.single, t))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(d) = this.draft.as_mut() {
+                            d.prop.single = !d.prop.single;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(kind == FieldType::DuplexLink, |d| {
+                d.child(div().text_size(px(12.)).text_color(t.text_muted).child("双向关联会在对方数据表自动新增一个回链字段，两边互相同步"))
+            });
+        body
+    }
+
+    /// 从 `field_editor` 拆出。
+    fn field_editor_select(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>, mut body: Div, kind: FieldType, prop: &Prop) -> Div {
+        let label = |s: &'static str| div().text_size(px(12.)).text_color(t.text_muted).child(s);
+        let mut list = div().id("fe-opts").max_h(px(220.)).overflow_y_scroll().flex().flex_col().gap(px(6.));
+        for o in &prop.options {
+            let inp = self.input(&format!("fd:opt:{}", o.id), "选项名称", &o.name, false, window, cx);
+            let (oid, oid2) = (o.id.clone(), o.id.clone());
+            let (bg, fg) = tag_color(o.color, t.dark);
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("oc-{oid}")))
+                            .size(px(20.))
+                            .flex_none()
+                            .rounded(px(5.))
+                            .bg(bg)
+                            .border_1()
+                            .border_color(fg.opacity(0.4))
+                            .cursor_pointer()
+                            .tooltip(tip("点击换颜色"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(o) = this.draft.as_mut().and_then(|d| d.prop.options.iter_mut().find(|o| o.id == oid)) {
+                                    o.color = (o.color + 1) % OPT_COLORS as u8;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(input_box(t).flex_1().h(px(28.)).child(inp))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("od-{oid2}")))
+                            .size(px(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.hover))
+                            .child(icon("x", 13., t.text_muted))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(d) = this.draft.as_mut() {
+                                    d.prop.options.retain(|o| o.id != oid2);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        body = body.child(label(if kind == FieldType::Stage { "流程节点（按顺序）" } else { "选项" })).child(list).child(
+            div()
+                .id("fe-optadd")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(13.))
+                .text_color(t.accent)
+                .cursor_pointer()
+                .child(icon("plus", 14., t.accent))
+                .child("添加选项")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(d) = this.draft.as_mut() {
+                        let n = d.prop.options.len();
+                        d.prop.options.push(SelOpt { id: new_id("opt"), name: format!("选项 {}", n + 1), color: (n % OPT_COLORS) as u8 });
+                    }
+                    cx.notify();
+                })),
+        );
+        body
     }
 
     /// 公式编辑助手：表达式输入、实时预览（用第一条记录试算）、字段与函数快捷插入。

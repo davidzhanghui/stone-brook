@@ -205,7 +205,7 @@ impl Editor {
     fn apply_prop(&mut self, ix: usize, field: &str, v: &str, cx: &mut Context<Self>) {
         match field {
             "inline_math" => {
-                let Some((b, c, start)) = self.inline_math_at.take() else { return };
+                let Some((b, c, start)) = self.sess.inline_math_at.take() else { return };
                 self.checkpoint(EditKind::Other);
                 let slot = self.slot_mut((b, c));
                 if start + 3 <= slot.len() {
@@ -216,8 +216,8 @@ impl Editor {
                         slot.update_marks(start..start + 3, |m| m.math = Some(tex.clone()));
                     }
                 }
-                self.head = self.clamp(Pos::new(b, c, start + if v.is_empty() { 0 } else { 3 }));
-                self.anchor = self.head;
+                self.core.head = self.clamp(Pos::new(b, c, start + if v.is_empty() { 0 } else { 3 }));
+                self.core.anchor = self.core.head;
                 self.changed(cx);
             }
             "insert_link" => {
@@ -226,11 +226,11 @@ impl Editor {
                 }
                 let url = if v.contains("://") || v.starts_with("mailto:") { v.to_string() } else { format!("https://{v}") };
                 self.checkpoint(EditKind::Other);
-                let h = self.head;
+                let h = self.core.head;
                 let rt = crate::model::RichText::styled_link(&url, &url);
                 self.slot_mut(h.slot()).insert_rich(h.offset, &rt);
-                self.head.offset += rt.len();
-                self.anchor = self.head;
+                self.core.head.offset += rt.len();
+                self.core.anchor = self.core.head;
                 self.changed(cx);
             }
             "link_url" => {
@@ -260,7 +260,7 @@ impl Editor {
 
     fn render_math_block(&mut self, ix: usize, blk: &Block, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let src = blk.text.text.clone();
-        let editing = focused && self.head.block == ix;
+        let editing = focused && self.core.head.block == ix;
         let state = if src.trim().is_empty() { None } else { Some(crate::math::request(&src, true, t.dark, cx)) };
         let preview: AnyElement = match state {
             None => div().text_size(px(13.)).text_color(t.placeholder).child(crate::i18n::tr("在下方输入 LaTeX 公式，例如 E = mc^2")).into_any_element(),
@@ -339,12 +339,12 @@ impl Editor {
             }
             h.finish()
         };
-        let cached = self.diagram_cache.borrow().get(&key).cloned();
+        let cached = self.caches.diagram_cache.borrow().get(&key).cloned();
         let result = match cached {
             Some(r) => r,
             None => {
                 let r = crate::diagram::render(&blk.text.text, dark, None, &mut GpuiMeasure { window }, offsets).map(Arc::new);
-                let mut c = self.diagram_cache.borrow_mut();
+                let mut c = self.caches.diagram_cache.borrow_mut();
                 if c.len() > 300 {
                     c.clear();
                 }
@@ -354,17 +354,17 @@ impl Editor {
         };
         match result {
             Ok(s) => {
-                self.diagram_good.borrow_mut().insert(blk.id, s.clone());
+                self.caches.diagram_good.borrow_mut().insert(blk.id, s.clone());
                 (Some(s), None)
             }
-            Err(e) => (self.diagram_good.borrow().get(&blk.id).cloned(), Some(e)),
+            Err(e) => (self.caches.diagram_good.borrow().get(&blk.id).cloned(), Some(e)),
         }
     }
 
     fn render_diagram(&mut self, ix: usize, blk: &Block, focused: bool, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let BlockKind::Diagram { view, offsets } = &blk.kind else { return div().into_any_element() };
         let view_mode = *view;
-        let editing = focused && self.head.block == ix;
+        let editing = focused && self.core.head.block == ix;
         let (scene, err) = self.diagram_scene(blk, t.dark, window);
         let kind = crate::diagram::detect(&blk.text.text);
         let show_src = view_mode == 2 || view_mode == 3 || (view_mode == 0 && editing) || scene.is_none() && err.is_none();
@@ -421,13 +421,13 @@ impl Editor {
                         this.pop.diagram_theme_menu = None;
                         if ev.click_count >= 2 {
                             // 双击：取消单击排下的弹框，进入源码编辑
-                            this.diagram_click = None;
+                            this.sess.diagram_click = None;
                             this.diagram_click_epoch = this.diagram_click_epoch.wrapping_add(1);
                             let len = this.slot_len((ix, 0));
                             this.set_cursor(Pos::new(ix, 0, len), false, cx);
                             return;
                         }
-                        this.diagram_click = Some((ix, ev.position));
+                        this.sess.diagram_click = Some((ix, ev.position));
                         if draggable {
                             this.diagram_drag_start(ix, ev.position, cx);
                         }
@@ -436,7 +436,7 @@ impl Editor {
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
-                        let Some((b, p)) = this.diagram_click.take() else { return };
+                        let Some((b, p)) = this.sess.diagram_click.take() else { return };
                         let (dx, dy) = (f32::from(ev.position.x - p.x), f32::from(ev.position.y - p.y));
                         if b == ix && dx * dx + dy * dy < 16. {
                             this.schedule_diagram_preview(ix, cx);
@@ -461,7 +461,7 @@ impl Editor {
                 placeholder: Some("flowchart LR\n  A[开始] --> B{判断}".into()),
                 ..SlotSpec::body(t)
             };
-            let (handle, drag) = self.diagram_scroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), Default::default())).clone();
+            let (handle, drag) = self.caches.diagram_scroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), Default::default())).clone();
             div()
                 .relative()
                 .flex_1()
@@ -710,8 +710,8 @@ impl Editor {
         out.push_str(&body.join("\n"));
         self.checkpoint(EditKind::Other);
         self.block_mut(ix).text = crate::model::RichText::plain(out);
-        self.head = self.clamp(self.head);
-        self.anchor = self.clamp(self.anchor);
+        self.core.head = self.clamp(self.core.head);
+        self.core.anchor = self.clamp(self.core.anchor);
         self.changed(cx);
     }
 
@@ -733,26 +733,26 @@ impl Editor {
 
     pub fn open_diagram_preview(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(b) = self.content.blocks.get(ix).filter(|b| matches!(b.kind, BlockKind::Diagram { .. })) {
-            self.diagram_preview = Some(b.id);
-            self.diagram_preview_zoom = 1.;
+            self.sess.diagram_preview = Some(b.id);
+            self.sess.diagram_preview_zoom = 1.;
             cx.notify();
         }
     }
 
     fn close_diagram_preview(&mut self, cx: &mut Context<Self>) {
-        self.diagram_preview = None;
+        self.sess.diagram_preview = None;
         cx.notify();
     }
 
     /// 弹框查看大图：暗色遮罩 + 居中面板，图按窗口等比放大；可缩放，点遮罩或按 Esc 关闭。
     pub(super) fn render_diagram_preview(&self, window: &Window, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = self.diagram_preview?;
-        let scene = self.diagram_good.borrow().get(&id).cloned()?;
+        let id = self.sess.diagram_preview?;
+        let scene = self.caches.diagram_good.borrow().get(&id).cloned()?;
         let vp = window.viewport_size();
         let (pw, ph) = (f32::from(vp.width) * 0.9, f32::from(vp.height) * 0.9);
         let (cw, ch) = (pw - 48., ph - 96.);
         let fit = (cw / scene.width).min(ch / scene.height).min(2.5);
-        let zoom = self.diagram_preview_zoom;
+        let zoom = self.sess.diagram_preview_zoom;
         let scale = fit * zoom;
         let title = self.content.blocks.iter().find(|b| b.id == id).and_then(|b| crate::diagram::detect(&b.text.text)).map(|k| k.label()).unwrap_or("文本绘图");
         let zbtn = |id: &'static str, name: &'static str, tip: &'static str| crate::ui::icon_button(id, name, tip, cx);
@@ -800,7 +800,7 @@ impl Editor {
                                         .border_color(t.border)
                                         .child(div().flex_1().text_size(px(14.)).text_color(t.text).child(title))
                                         .child(zbtn("dg-pz-out", "zoom-out", "缩小").on_click(cx.listener(|this, _, _, cx| {
-                                            this.diagram_preview_zoom = (this.diagram_preview_zoom / 1.25).max(0.2);
+                                            this.sess.diagram_preview_zoom = (this.sess.diagram_preview_zoom / 1.25).max(0.2);
                                             cx.notify();
                                         })))
                                         .child(
@@ -812,11 +812,11 @@ impl Editor {
                                                 .child(format!("{:.0}%", scale * 100.)),
                                         )
                                         .child(zbtn("dg-pz-in", "zoom-in", "放大").on_click(cx.listener(|this, _, _, cx| {
-                                            this.diagram_preview_zoom = (this.diagram_preview_zoom * 1.25).min(8.);
+                                            this.sess.diagram_preview_zoom = (this.sess.diagram_preview_zoom * 1.25).min(8.);
                                             cx.notify();
                                         })))
                                         .child(zbtn("dg-pz-fit", "maximize", "适应窗口").on_click(cx.listener(|this, _, _, cx| {
-                                            this.diagram_preview_zoom = 1.;
+                                            this.sess.diagram_preview_zoom = 1.;
                                             cx.notify();
                                         })))
                                         .child(div().w(px(1.)).h(px(16.)).mx_1().bg(t.border))
@@ -845,7 +845,7 @@ impl Editor {
     }
 
     fn export_diagram(&mut self, ix: usize, png: bool, cx: &mut Context<Self>) {
-        let Some(scene) = self.diagram_good.borrow().get(&self.content.blocks[ix].id).cloned() else { return };
+        let Some(scene) = self.caches.diagram_good.borrow().get(&self.content.blocks[ix].id).cloned() else { return };
         let mut s = (*scene).clone();
         s.bg = Some(if self.content.blocks.is_empty() { crate::canvas::Col::rgb(0xffffff) } else { crate::canvas::Col::from_hsla(theme(cx).bg) });
         let svg = crate::canvas::svg::to_svg(&s);
@@ -883,11 +883,11 @@ impl Editor {
             cx.emit(EditorEvent::Toast("只有流程图可以转换".into()));
             return;
         };
-        let id = crate::objects::create("flow", Some(crate::objects::ObjData::Board(Arc::new(board))));
+        let id = crate::objects::create(crate::objects::ObjKind::Flow, Some(crate::objects::ObjData::Board(Arc::new(board))));
         self.checkpoint(EditKind::Other);
         self.insert_blocks(ix + 1, vec![Block::new(BlockKind::Embed { kind: "flow".into(), id: id.clone() }, crate::model::RichText::default())]);
-        self.head = Pos::new(ix + 1, 0, 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(ix + 1, 0, 0);
+        self.core.anchor = self.core.head;
         self.changed(cx);
         cx.emit(EditorEvent::OpenEmbed { kind: "flow".into(), id });
     }
@@ -901,12 +901,12 @@ impl Editor {
             BlockKind::Diagram { offsets, .. } => offsets.get(&id).copied().unwrap_or((0., 0.)),
             _ => return,
         };
-        self.diagram_drag = Some(DiagramDrag { block: ix, node: id, start: p, base, moved: false });
+        self.sess.diagram_drag = Some(DiagramDrag { block: ix, node: id, start: p, base, moved: false });
         cx.notify();
     }
 
     pub(super) fn diagram_drag_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let Some(d) = &self.diagram_drag else { return false };
+        let Some(d) = &self.sess.diagram_drag else { return false };
         let Some((view, _)) = self.frame.borrow().diagrams.get(&d.block).cloned() else { return true };
         let p = view.inv(pos);
         if !d.moved {
@@ -916,7 +916,7 @@ impl Editor {
             }
             self.checkpoint(EditKind::Other);
         }
-        let Some(d) = &mut self.diagram_drag else { return false };
+        let Some(d) = &mut self.sess.diagram_drag else { return false };
         d.moved = true;
         let (dx, dy) = (d.base.0 + p.x - d.start.x, d.base.1 + p.y - d.start.y);
         let (b, node) = (d.block, d.node.clone());
@@ -930,7 +930,7 @@ impl Editor {
     }
 
     pub(super) fn diagram_drag_end(&mut self, cx: &mut Context<Self>) {
-        if self.diagram_drag.take().is_some_and(|d| d.moved) {
+        if self.sess.diagram_drag.take().is_some_and(|d| d.moved) {
             self.changed(cx);
         }
     }
@@ -1035,7 +1035,7 @@ impl Editor {
     /// 上传的整页 HTML：默认显示首屏快照，点击后切换为可交互的真实 WebView。
     fn render_html_file(&mut self, ix: usize, blk: &Block, file: &str, network: bool, t: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let width = content_w() - blk.indent as f32 * 26.;
-        let live = self.html_live == Some(blk.id);
+        let live = self.sess.html_live == Some(blk.id);
         let path = PathBuf::from(file);
         let state = if path.exists() { Some(crate::webview::request_file(&path, network, width, HTML_FILE_MAX_H, cx)) } else { None };
         let frame = self.frame.clone();
@@ -1132,11 +1132,11 @@ impl Editor {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    if this.html_live == Some(bid) {
-                        this.html_live = None;
+                    if this.sess.html_live == Some(bid) {
+                        this.sess.html_live = None;
                         crate::webview::hide_live();
                     } else {
-                        this.html_live = Some(bid);
+                        this.sess.html_live = Some(bid);
                     }
                     cx.notify();
                 }),
@@ -1189,11 +1189,11 @@ impl Editor {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
                     window.focus(&this.focus);
-                    if this.head.block != ix {
+                    if this.core.head.block != ix {
                         this.set_cursor(Pos::new(ix, 0, 0), false, cx);
                     }
-                    if this.html_live != Some(bid) {
-                        this.html_live = Some(bid);
+                    if this.sess.html_live != Some(bid) {
+                        this.sess.html_live = Some(bid);
                     }
                     cx.notify();
                 }),
@@ -1229,16 +1229,16 @@ impl Editor {
         if let BlockKind::Html { file, .. } = &mut b.kind {
             *file = dst;
         }
-        self.html_live = None;
+        self.sess.html_live = None;
         crate::webview::hide_live();
         self.changed(cx);
     }
 
     fn render_html_source(&mut self, ix: usize, blk: &Block, scripts: bool, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let editing = focused && self.head.block == ix;
+        let editing = focused && self.core.head.block == ix;
         let src = blk.text.text.clone();
         let width = content_w() - blk.indent as f32 * 26. - 20.;
-        let live = self.html_live == Some(blk.id);
+        let live = self.sess.html_live == Some(blk.id);
         let state = if src.trim().is_empty() { None } else { Some(crate::webview::request_html(&src, scripts, t.dark, width, cx)) };
         let frame = self.frame.clone();
         let bid = blk.id;
@@ -1312,11 +1312,11 @@ impl Editor {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            if this.html_live == Some(bid) {
-                                this.html_live = None;
+                            if this.sess.html_live == Some(bid) {
+                                this.sess.html_live = None;
                                 crate::webview::hide_live();
                             } else {
-                                this.html_live = Some(bid);
+                                this.sess.html_live = Some(bid);
                             }
                             cx.notify();
                         }),
@@ -1344,7 +1344,7 @@ impl Editor {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
                     window.focus(&this.focus);
-                    if this.head.block != ix {
+                    if this.core.head.block != ix {
                         let len = this.slot_len((ix, 0));
                         this.set_cursor(Pos::new(ix, 0, len), false, cx);
                     }
@@ -1603,20 +1603,23 @@ impl Editor {
         let maxw = content_w() - blk.indent as f32 * 26.;
         let (k1, id1) = (kind.to_string(), oid.to_string());
         let (k2, id2) = (kind.to_string(), oid.to_string());
-        let preview: AnyElement = match crate::objects::get(oid) {
-            None => div().p_4().text_size(px(13.)).text_color(t.fg_palette[1]).child(crate::i18n::tr("对象数据丢失")).into_any_element(),
-            Some(crate::objects::ObjData::Sheet(_)) => {
+        let preview: AnyElement = match crate::objects::load(oid).map_err(|e| match e {
+            crate::objects::LoadError::Missing => crate::i18n::tr("对象数据丢失").to_string(),
+            e => e.message(),
+        }) {
+            Err(msg) => div().p_4().text_size(px(13.)).text_color(t.fg_palette[1]).child(msg).into_any_element(),
+            Ok(crate::objects::ObjData::Sheet(_)) => {
                 // 文档里的表格直接可编辑，选中后上方浮出工具栏，「全屏」进入完整编辑页
                 let view = self.live_sheet(oid, window, cx);
                 view.update(cx, |v, _| v.embed_max_w = maxw - 18.);
                 div().max_w(px(maxw - 18.)).overflow_hidden().child(view).into_any_element()
             }
-            Some(crate::objects::ObjData::Base(_)) => {
+            Ok(crate::objects::ObjData::Base(_)) => {
                 // 文档里的多维表格直接可交互（切换视图、编辑单元格、拖看板卡片），「全屏」进入完整编辑页
                 let view = self.live_base(oid, window, cx);
                 div().w(px(maxw - 16.)).h(px(view.read(cx).embed_h)).overflow_hidden().child(view).into_any_element()
             }
-            Some(crate::objects::ObjData::Sketch(d)) => match crate::sketch::preview_size(&d, maxw - 16.) {
+            Ok(crate::objects::ObjData::Sketch(d)) => match crate::sketch::preview_size(&d, maxw - 16.) {
                 None => div()
                     .h(px(140.))
                     .flex()
@@ -1637,7 +1640,7 @@ impl Editor {
                         .into_any_element()
                 }
             },
-            Some(data) => {
+            Ok(data) => {
                 let mut scene = match &data {
                     crate::objects::ObjData::Board(b) => b.to_scene(t.dark),
                     _ => Scene::default(),
@@ -1745,7 +1748,7 @@ impl Editor {
 
     /// 视频全屏浮层。
     pub(super) fn render_video_full(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = self.video_full?;
+        let id = self.sess.video_full?;
         // 文本视图下行内视频块不渲染，放大预览的播放器不在 f.videos 里，得自己声明可见，否则会被 pause_except 立刻暂停
         crate::media::mark_visible(id);
         let path = self.content.blocks.iter().find_map(|b| match &b.kind {
@@ -1898,7 +1901,7 @@ impl Editor {
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.video_full = None;
+                                this.sess.video_full = None;
                                 cx.notify();
                             }),
                         ),

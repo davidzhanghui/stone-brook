@@ -299,20 +299,6 @@ impl BaseEditor {
         let (r_del, r_dup) = (rid.clone(), rid.clone());
         let can_prev = pos.is_some_and(|p| p > 0);
         let can_next = pos.is_some_and(|p| p + 1 < rows.len());
-        let nav_btn = |id: &'static str, ic: &'static str, ok: bool, d: i32, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .size(px(28.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|s| s.bg(t.hover))
-                .when(!ok, |s| s.opacity(0.35))
-                .child(icon(ic, 15., t.text_secondary))
-                .on_click(cx.listener(move |this, _, _, cx| this.detail_nav(d, cx)))
-        };
         let modal = div()
             .w(px(if layout == 1 && tab == 0 { 820. } else { 720. }))
             .max_h(relative(0.86))
@@ -324,74 +310,7 @@ impl BaseEditor {
             .border_color(t.border)
             .shadow_lg()
             .occlude()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(16.))
-                    .h(px(52.))
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(nav_btn("d-up", "chevron-up", can_prev, -1, cx).tooltip(tip("上一条记录")))
-                    .child(nav_btn("d-down", "chevron-down", can_next, 1, cx).tooltip(tip("下一条记录")))
-                    .child(div().text_size(px(12.)).text_color(t.text_muted).child(pos.map(|p| format!("{} / {}", p + 1, rows.len())).unwrap_or_default()))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("d-dup")
-                            .px(px(8.))
-                            .h(px(28.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded(px(6.))
-                            .text_size(px(12.5))
-                            .text_color(t.text_secondary)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hover))
-                            .child(icon("copy", 13., t.text_secondary))
-                            .child("创建副本")
-                            .on_click(cx.listener(move |this, _, _, cx| this.duplicate_record(&r_dup, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("d-del")
-                            .px(px(8.))
-                            .h(px(28.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded(px(6.))
-                            .text_size(px(12.5))
-                            .text_color(t.text_secondary)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hover))
-                            .child(icon("trash", 13., t.text_secondary))
-                            .child("删除")
-                            .on_click(cx.listener(move |this, _, _, cx| this.delete_records(std::slice::from_ref(&r_del), cx))),
-                    )
-                    .child(
-                        div()
-                            .id("d-close")
-                            .size(px(28.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hover))
-                            .child(icon("x", 16., t.text_secondary))
-                            .on_click(cx.listener(|this, _, w, cx| {
-                                this.detail = None;
-                                this.close_popups();
-                                w.focus(&this.focus);
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(self.render_detail_d_dup(t, cx, can_next, can_prev, pos, r_del.clone(), r_dup.clone(), &rows))
             .child(
                 div()
                     .id("d-body")
@@ -450,6 +369,100 @@ impl BaseEditor {
                 )
                 .into_any_element(),
         )
+    }
+    /// 从 `render_detail` 拆出。
+    fn render_detail_d_dup(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        can_next: bool,
+        can_prev: bool,
+        pos: Option<usize>,
+        r_del: String,
+        r_dup: String,
+        rows: &std::rc::Rc<Vec<String>>,
+    ) -> AnyElement {
+        let nav_btn = |id: &'static str, ic: &'static str, ok: bool, d: i32, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover))
+                .when(!ok, |s| s.opacity(0.35))
+                .child(icon(ic, 15., t.text_secondary))
+                .on_click(cx.listener(move |this, _, _, cx| this.detail_nav(d, cx)))
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .px(px(16.))
+            .h(px(52.))
+            .flex_none()
+            .border_b_1()
+            .border_color(t.border)
+            .child(nav_btn("d-up", "chevron-up", can_prev, -1, cx).tooltip(tip("上一条记录")))
+            .child(nav_btn("d-down", "chevron-down", can_next, 1, cx).tooltip(tip("下一条记录")))
+            .child(div().text_size(px(12.)).text_color(t.text_muted).child(pos.map(|p| format!("{} / {}", p + 1, rows.len())).unwrap_or_default()))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("d-dup")
+                    .px(px(8.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(t.text_secondary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover))
+                    .child(icon("copy", 13., t.text_secondary))
+                    .child("创建副本")
+                    .on_click(cx.listener(move |this, _, _, cx| this.duplicate_record(&r_dup, cx))),
+            )
+            .child(
+                div()
+                    .id("d-del")
+                    .px(px(8.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(t.text_secondary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover))
+                    .child(icon("trash", 13., t.text_secondary))
+                    .child("删除")
+                    .on_click(cx.listener(move |this, _, _, cx| this.delete_records(std::slice::from_ref(&r_del), cx))),
+            )
+            .child(
+                div()
+                    .id("d-close")
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover))
+                    .child(icon("x", 16., t.text_secondary))
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        this.detail = None;
+                        this.close_popups();
+                        w.focus(&this.focus);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     /// 关联标签页：每个关联字段一张小表（主字段 + 前几个字段），可移除、可添加。

@@ -21,25 +21,23 @@ impl Editor {
         };
         let (rows, cols) = ((*rows).max(1), (*cols).max(1));
         let bid = self.content.blocks[ix].id;
-        let active = focused && self.head.block == ix;
+        let active = focused && self.core.head.block == ix;
         let rect = if focused { self.table_sel_rect(ix) } else { None };
-        let in_merge = active && rect.is_none() && crate::model::merge_at(merges, self.head.cell / cols, self.head.cell % cols).is_some();
+        let in_merge = active && rect.is_none() && crate::model::merge_at(merges, self.core.head.cell / cols, self.core.head.cell % cols).is_some();
         let is_head = |r: usize, c: usize| (r == 0 && *header_row) || (c == 0 && *header_col);
         // 列宽：拖动中用预览值，其次用保存的比例，否则均分
-        let weights: Vec<f32> = match self.table_col_drag.as_ref().filter(|d| d.block == ix) {
+        let weights: Vec<f32> = match self.sess.table_col_drag.as_ref().filter(|d| d.block == ix) {
             Some(d) => d.cur.clone(),
             None => widths.clone().filter(|w| w.len() == cols).unwrap_or_else(|| vec![1.; cols]),
         };
         let mut template = vec![-HANDLE];
         template.extend(weights.iter().copied());
-        let geo = self.table_geo.borrow().get(&bid).cloned().unwrap_or_default();
+        let geo = self.caches.table_geo.borrow().get(&bid).cloned().unwrap_or_default();
         let geo_ok = geo.cols.len() == cols && geo.rows.len() == rows;
-        let hover = self.table_insert_hover.filter(|h| h.block == ix);
-        let row_sel = |r: usize| rect.is_some_and(|(r1, c1, r2, c2)| c1 == 0 && c2 == cols - 1 && r >= r1 && r <= r2);
-        let col_sel = |c: usize| rect.is_some_and(|(r1, c1, r2, c2)| r1 == 0 && r2 == rows - 1 && c >= c1 && c <= c2);
+        let hover = self.sess.table_insert_hover.filter(|h| h.block == ix);
         let all_sel = rect == Some((0, 0, rows - 1, cols - 1));
         let bar_color = |on: bool| if on { t.accent } else { t.border };
-        let geo_store = self.table_geo.clone();
+        let geo_store = self.caches.table_geo.clone();
 
         let mut grid = div().id(("tb-grid", bid as usize)).relative().w_full().grid().grid_col_weights(template);
         // 整张表的区域（含手柄）
@@ -99,108 +97,12 @@ impl Editor {
             // 列手柄
             for c in 0..cols {
                 let geo_store = geo_store.clone();
-                grid = grid.child(
-                    div()
-                        .row_start(1)
-                        .row_end(2)
-                        .col_start((c + 2) as i16)
-                        .col_end((c + 3) as i16)
-                        .pb(px(HANDLE - BAR))
-                        .child(
-                            canvas(
-                                move |b, window, _| {
-                                    let mut g = geo_store.borrow_mut();
-                                    let g = g.entry(bid).or_default();
-                                    g.cols.resize(cols, Bounds::default());
-                                    let old = std::mem::replace(&mut g.cols[c], b);
-                                    // 覆盖层用上一帧的几何：编辑中几何变了就补一帧
-                                    if active && old.size != b.size {
-                                        window.refresh();
-                                    }
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
-                        )
-                        .child(
-                            div()
-                                .id(("tb-ch", bid as usize * 64 + c))
-                                .h(px(BAR))
-                                .w_full()
-                                .when(c == 0, |d| d.rounded_l(px(3.)))
-                                .when(c == cols - 1, |d| d.rounded_r(px(3.)))
-                                .border_r_1()
-                                .border_color(t.bg)
-                                .bg(bar_color(col_sel(c)))
-                                .cursor_pointer()
-                                .when(!active, |d| d.invisible())
-                                .hover(|s| s.bg(if col_sel(c) { t.accent } else { t.border_strong }))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        window.focus(&this.focus);
-                                        this.table_select(ix, (0, c, rows - 1, c), cx);
-                                    }),
-                                ),
-                        ),
-                );
+                grid = grid.child(self.render_table_part_2(ix, t, cx, active, bid, c, cols, geo_store.clone(), rows, rect));
             }
             // 行手柄
             for r in 0..rows {
                 let geo_store = geo_store.clone();
-                grid = grid.child(
-                    div()
-                        .row_start((r + 2) as i16)
-                        .row_end((r + 3) as i16)
-                        .col_start(1)
-                        .col_end(2)
-                        .when(row_min[r] > 0., |d| d.min_h(px(row_min[r])))
-                        .pr(px(HANDLE - BAR))
-                        .child(
-                            canvas(
-                                move |b, window, _| {
-                                    let mut g = geo_store.borrow_mut();
-                                    let g = g.entry(bid).or_default();
-                                    g.rows.resize(rows, Bounds::default());
-                                    let old = std::mem::replace(&mut g.rows[r], b);
-                                    if active && old.size != b.size {
-                                        window.refresh();
-                                    }
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
-                        )
-                        .child(
-                            div()
-                                .id(("tb-rh", bid as usize * 4096 + r))
-                                .w(px(BAR))
-                                .h_full()
-                                .when(r == 0, |d| d.rounded_t(px(3.)))
-                                .when(r == rows - 1, |d| d.rounded_b(px(3.)))
-                                .border_b_1()
-                                .border_color(t.bg)
-                                .bg(bar_color(row_sel(r)))
-                                .cursor_pointer()
-                                .when(!active, |d| d.invisible())
-                                .hover(|s| s.bg(if row_sel(r) { t.accent } else { t.border_strong }))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        window.focus(&this.focus);
-                                        this.table_select(ix, (r, 0, r, cols - 1), cx);
-                                    }),
-                                ),
-                        ),
-                );
+                grid = grid.child(self.render_table_part(ix, t, cx, active, bid, cols, geo_store.clone(), r, &row_min, rows, rect));
             }
         }
         // 单元格：支持跨行跨列（合并单元格）
@@ -263,7 +165,7 @@ impl Editor {
 
         // ── 覆盖层（依赖上一帧几何）──
         // 阅读模式：不显示行列手柄、列宽拖柄与插入「+」
-        if geo_ok && active && !self.read_only {
+        if geo_ok && active && !self.sess.read_only {
             let ox = geo.grid.left();
             let oy = geo.grid.top();
             let body_top = geo.rows[0].top() - oy;
@@ -274,7 +176,7 @@ impl Editor {
             let row_y = |k: usize| if k < rows { geo.rows[k].top() - oy } else { geo.rows[rows - 1].bottom() - oy };
             // 列宽拖柄：每条内部列边线
             for c in 0..cols.saturating_sub(1) {
-                let dragging = self.table_col_drag.as_ref().is_some_and(|d| d.block == ix && d.col == c);
+                let dragging = self.sess.table_col_drag.as_ref().is_some_and(|d| d.block == ix && d.col == c);
                 grid = grid.child(
                     div()
                         .id(("tb-rs", bid as usize * 64 + c))
@@ -321,9 +223,9 @@ impl Editor {
                     )
                     .tooltip(move |_, cx| cx.new(|_| Tooltip(if h.col { "插入列" } else { "插入行" }.into())).into())
                     .on_hover(cx.listener(move |this, over: &bool, _, cx| {
-                        let next = if *over { Some(h) } else { this.table_insert_hover.filter(|x| *x != h) };
-                        if this.table_insert_hover != next {
-                            this.table_insert_hover = next;
+                        let next = if *over { Some(h) } else { this.sess.table_insert_hover.filter(|x| *x != h) };
+                        if this.sess.table_insert_hover != next {
+                            this.sess.table_insert_hover = next;
                             cx.notify();
                         }
                     }))
@@ -446,6 +348,142 @@ impl Editor {
             .children(toolbar)
             .into_any_element()
     }
+    /// 从 `render_table` 拆出。
+    fn render_table_part_2(
+        &self,
+        ix: usize,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        active: bool,
+        bid: u64,
+        c: usize,
+        cols: usize,
+        geo_store: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, TableGeo>>>,
+        rows: usize,
+        rect: Option<(usize, usize, usize, usize)>,
+    ) -> AnyElement {
+        const HANDLE: f32 = 16.;
+        const BAR: f32 = 11.;
+        let col_sel = |c: usize| rect.is_some_and(|(r1, c1, r2, c2)| r1 == 0 && r2 == rows - 1 && c >= c1 && c <= c2);
+        let bar_color = |on: bool| if on { t.accent } else { t.border };
+        div()
+            .row_start(1)
+            .row_end(2)
+            .col_start((c + 2) as i16)
+            .col_end((c + 3) as i16)
+            .pb(px(HANDLE - BAR))
+            .child(
+                canvas(
+                    move |b, window, _| {
+                        let mut g = geo_store.borrow_mut();
+                        let g = g.entry(bid).or_default();
+                        g.cols.resize(cols, Bounds::default());
+                        let old = std::mem::replace(&mut g.cols[c], b);
+                        // 覆盖层用上一帧的几何：编辑中几何变了就补一帧
+                        if active && old.size != b.size {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .id(("tb-ch", bid as usize * 64 + c))
+                    .h(px(BAR))
+                    .w_full()
+                    .when(c == 0, |d| d.rounded_l(px(3.)))
+                    .when(c == cols - 1, |d| d.rounded_r(px(3.)))
+                    .border_r_1()
+                    .border_color(t.bg)
+                    .bg(bar_color(col_sel(c)))
+                    .cursor_pointer()
+                    .when(!active, |d| d.invisible())
+                    .hover(|s| s.bg(if col_sel(c) { t.accent } else { t.border_strong }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.focus);
+                            this.table_select(ix, (0, c, rows - 1, c), cx);
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 从 `render_table` 拆出。
+    fn render_table_part(
+        &self,
+        ix: usize,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        active: bool,
+        bid: u64,
+        cols: usize,
+        geo_store: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, TableGeo>>>,
+        r: usize,
+        row_min: &[f32],
+        rows: usize,
+        rect: Option<(usize, usize, usize, usize)>,
+    ) -> AnyElement {
+        const HANDLE: f32 = 16.;
+        const BAR: f32 = 11.;
+        let row_sel = |r: usize| rect.is_some_and(|(r1, c1, r2, c2)| c1 == 0 && c2 == cols - 1 && r >= r1 && r <= r2);
+        let bar_color = |on: bool| if on { t.accent } else { t.border };
+        div()
+            .row_start((r + 2) as i16)
+            .row_end((r + 3) as i16)
+            .col_start(1)
+            .col_end(2)
+            .when(row_min[r] > 0., |d| d.min_h(px(row_min[r])))
+            .pr(px(HANDLE - BAR))
+            .child(
+                canvas(
+                    move |b, window, _| {
+                        let mut g = geo_store.borrow_mut();
+                        let g = g.entry(bid).or_default();
+                        g.rows.resize(rows, Bounds::default());
+                        let old = std::mem::replace(&mut g.rows[r], b);
+                        if active && old.size != b.size {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .id(("tb-rh", bid as usize * 4096 + r))
+                    .w(px(BAR))
+                    .h_full()
+                    .when(r == 0, |d| d.rounded_t(px(3.)))
+                    .when(r == rows - 1, |d| d.rounded_b(px(3.)))
+                    .border_b_1()
+                    .border_color(t.bg)
+                    .bg(bar_color(row_sel(r)))
+                    .cursor_pointer()
+                    .when(!active, |d| d.invisible())
+                    .hover(|s| s.bg(if row_sel(r) { t.accent } else { t.border_strong }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.focus);
+                            this.table_select(ix, (r, 0, r, cols - 1), cx);
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
 
     /// 行列选择器的落点：贴菜单右侧，右侧放不下翻到左侧，再不行贴窗口右边。
     pub(crate) fn table_picker_pos(&self, window: &Window) -> Point<Pixels> {
@@ -566,7 +604,7 @@ impl Editor {
     }
 
     pub(super) fn render_columns(&self, ix: usize, cols: &[RichText], focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let active = focused && self.head.block == ix;
+        let active = focused && self.core.head.block == ix;
         let n = cols.len();
         let toolbar = active.then(|| {
             let btn = |id: &'static str, label: &'static str, add: bool, cx: &mut Context<Self>| {
@@ -611,7 +649,7 @@ impl Editor {
             .flex_row()
             .gap(px(14.))
             .children(cols.iter().enumerate().map(|(c, rt)| {
-                let in_col = active && self.head.cell == c;
+                let in_col = active && self.core.head.cell == c;
                 div()
                     .flex_1()
                     .min_w(px(0.))
@@ -631,7 +669,7 @@ impl Editor {
                         c,
                         rt,
                         SlotSpec {
-                            placeholder: (focused && rt.is_empty() && self.head == Pos::new(ix, c, 0)).then(|| format!("第 {} 栏", c + 1).into()),
+                            placeholder: (focused && rt.is_empty() && self.core.head == Pos::new(ix, c, 0)).then(|| format!("第 {} 栏", c + 1).into()),
                             ..SlotSpec::body(t)
                         },
                         focused,

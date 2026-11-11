@@ -1,5 +1,6 @@
 //! 石渠 Stonebrook —— 纯本地的块级文档编辑器（Rust + GPUI）。
 
+mod assets;
 #[cfg(feature = "dev")]
 mod autotest;
 mod backup;
@@ -11,11 +12,13 @@ mod convert;
 mod diagram;
 mod docxml;
 mod editor;
+mod embed;
 mod highlight;
 mod i18n;
 mod katex_assets;
 mod line_input;
 mod linkcard;
+mod lru;
 mod math;
 mod media;
 mod model;
@@ -28,11 +31,13 @@ mod sheet;
 mod shortcuts;
 mod sketch;
 mod store;
+mod sysui;
 mod templates;
 mod text_area;
 mod theme;
 mod theme_css;
 mod ui;
+mod updater;
 mod webview;
 mod words;
 mod workspace;
@@ -164,6 +169,7 @@ fn menus() -> Vec<Menu> {
             name: crate::store::APP_NAME.into(),
             items: vec![
                 MenuItem::action(format!("关于{}", crate::store::APP_NAME), About),
+                MenuItem::action(crate::i18n::tr("检查更新…"), CheckUpdate),
                 MenuItem::separator(),
                 MenuItem::action(crate::i18n::tr("设置…"), OpenSettings),
                 MenuItem::action(crate::i18n::tr("命令面板…"), CommandPalette),
@@ -297,31 +303,59 @@ pub fn flush_all() {
     }
 }
 
+/// 正常退出：落盘，有下载好的新版本就在退出后装上。
+fn quit_app(cx: &mut App) {
+    flush_all();
+    updater::install_on_quit();
+    cx.quit();
+}
+
 fn main() {
     install_panic_log();
     // 上次选择了「从备份恢复」：在打开数据库之前换入
-    if let Some(msg) = backup::apply_pending() {
-        eprintln!("{msg}");
-    }
+    let restore = backup::apply_pending();
     let store = match store::Store::open() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("无法打开数据库: {e}");
+            eprintln!("无法打开数据库: {e:#}");
+            // 双击启动的 .app 没有终端，必须给用户一个看得见的说明
+            let mut msg = format!("{e:#}\n\n数据目录：{}", store::data_dir().display());
+            if let Some(Err(r)) = &restore {
+                msg.push_str(&format!("\n\n{r}"));
+            }
+            sysui::fatal_dialog("石渠无法打开数据库", &msg, &store::data_dir());
             std::process::exit(1);
         }
     };
+    // 恢复结果放进存储的提示通道，窗口打开后由工作区以 toast 显示
+    if let Some(r) = restore {
+        store.report_error(r.unwrap_or_else(|e| e));
+    }
     settings::load(&store);
     i18n::set_english(store.get_kv("lang").as_deref() == Some("en"));
     board::iconlib::warm();
     store::install(store.clone());
+    updater::auto_check(&store);
     // 后台回收：7 天前起不再被任何文档引用的嵌入对象
     {
         let s = store.clone();
         std::thread::spawn(move || {
+            base::db::prune_history(&s);
             let n = objects::gc(&s);
             if n > 0 {
                 eprintln!("回收了 {n} 个未引用对象");
             }
+            // 资源文件：对象回收之后再扫引用；引用读不全就跳过，宁可不回收
+            match s.asset_reference_texts() {
+                Ok(texts) => {
+                    let (n, bytes) = assets::gc_assets(&s.assets_dir(), &texts);
+                    if n > 0 {
+                        eprintln!("回收了 {n} 个未引用资源（{} MB）", bytes / 1024 / 1024);
+                    }
+                }
+                Err(e) => eprintln!("资源回收跳过：{e}"),
+            }
+            assets::trim_cache(&s.data_dir.join("cache"), assets::CACHE_LIMIT);
         });
     }
     Application::new().with_assets(ui::Assets).run(move |cx: &mut App| {
@@ -331,10 +365,7 @@ fn main() {
         // 记下内置按键作为基准，再叠加用户在快捷键面板里改过的按键
         shortcuts::init(cx);
         cx.set_menus(menus());
-        cx.on_action(|_: &Quit, cx: &mut App| {
-            flush_all();
-            cx.quit();
-        });
+        cx.on_action(|_: &Quit, cx: &mut App| quit_app(cx));
         // 电子表格停手后落盘（只在有脏表时做事）
         cx.spawn(async move |cx: &mut AsyncApp| loop {
             cx.background_executor().timer(objects::SHEET_DEBOUNCE / 2).await;
@@ -379,7 +410,7 @@ fn main() {
             .ok();
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
-                cx.quit();
+                quit_app(cx);
             }
         })
         .detach();

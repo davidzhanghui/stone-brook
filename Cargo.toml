@@ -1,6 +1,6 @@
 [package]
 name = "stonebrook"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 license = "MIT"
 description = "石渠 Stonebrook — 本地块级文档编辑器"
@@ -22,20 +22,22 @@ dirs = "5"
 pulldown-cmark = { version = "0.12", default-features = false }
 scraper = "0.20"
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg", "gif", "webp", "ico", "bmp"] }
 unicode-segmentation = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSProcessInfo", "NSArray", "NSData", "NSURL", "NSError", "NSDictionary", "NSValue", "NSGeometry", "NSObject", "NSEnumerator", "NSKeyValueCoding", "NSURLRequest", "NSValue", "block2"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSEvent", "NSView", "NSWindow", "NSResponder", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSWorkspace", "NSApplication", "NSRunningApplication", "NSGraphicsContext", "NSPrintOperation", "NSPrintInfo", "objc2-core-foundation", "objc2-core-graphics", "block2"] }
-objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKSnapshotConfiguration", "WKNavigation", "WKPDFConfiguration", "WKFrameInfo", "objc2-app-kit", "block2"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKWebsiteDataStore", "WKWebViewConfiguration", "WKPreferences", "WKWebpagePreferences", "WKSnapshotConfiguration", "WKNavigation", "WKPDFConfiguration", "WKFrameInfo", "objc2-app-kit", "block2"] }
 objc2-av-foundation = { version = "0.3", features = ["AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVAsset", "AVAssetImageGenerator", "AVTime", "objc2-core-foundation", "objc2-core-media", "objc2-core-video", "objc2-core-graphics", "block2"] }
 objc2-core-media = { version = "0.3", features = ["CMTime", "CMTimeRange"] }
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGWindow"] }
 objc2-core-foundation = { version = "0.3", features = ["CFString", "CFLocale", "CFStringTokenizer", "CFBase", "CFCGTypes", "CFArray"] }
 core-video = "=0.4.3"
+url = "2"
+sha2 = "0.10"
 ureq = "3"
 roughr = "0.14"
 # 草图：自由画 / 线条圆头圆角（与 GPUI 内部的 lyon 同一版本）

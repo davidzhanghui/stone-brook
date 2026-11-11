@@ -21,35 +21,35 @@ pub fn is_url(t: &str) -> bool {
 impl Editor {
     /// 在光标处插入网址链接，返回 true 表示已处理。
     pub(super) fn paste_url(&mut self, url: &str, cx: &mut Context<Self>) -> bool {
-        let h = self.head;
+        let h = self.core.head;
         if self.has_selection() || self.content.blocks[h.block].kind.is_void() || self.content.blocks[h.block].kind.is_source() || h.block == 0 {
             return false;
         }
         self.checkpoint(EditKind::Other);
         let marks = Marks { link: Some(url.to_string()), ..Default::default() };
         self.slot_mut(h.slot()).insert(h.offset, url, marks);
-        self.url_paste = Some(UrlPaste { slot: h.slot(), start: h.offset, len: url.len(), url: url.to_string(), waiting: false });
-        self.head.offset += url.len();
-        self.anchor = self.head;
+        self.sess.url_paste = Some(UrlPaste { slot: h.slot(), start: h.offset, len: url.len(), url: url.to_string(), waiting: false });
+        self.core.head.offset += url.len();
+        self.core.anchor = self.core.head;
         self.changed(cx);
         true
     }
 
     /// 链接文字仍在原处时返回其范围。
     fn url_paste_range(&self) -> Option<std::ops::Range<usize>> {
-        let up = self.url_paste.as_ref()?;
+        let up = self.sess.url_paste.as_ref()?;
         let t = self.slot_text(up.slot)?;
         let r = up.start..up.start + up.len;
         (r.end <= t.len() && t.text.is_char_boundary(r.start) && t.text.is_char_boundary(r.end)).then_some(r)
     }
 
     pub fn url_paste_title(&mut self, cx: &mut Context<Self>) {
-        let Some(up) = self.url_paste.as_mut() else { return };
+        let Some(up) = self.sess.url_paste.as_mut() else { return };
         let url = up.url.clone();
         match crate::linkcard::request(&url, cx) {
             CardState::Ready(c) if !c.title.trim().is_empty() => self.replace_url_text(&c.title, cx),
             CardState::Loading => {
-                if let Some(up) = self.url_paste.as_mut() {
+                if let Some(up) = self.sess.url_paste.as_mut() {
                     up.waiting = true;
                 }
                 cx.notify();
@@ -60,35 +60,35 @@ impl Editor {
                 } else {
                     "已关闭联网，无法获取标题（可在设置中开启）".into()
                 }));
-                self.url_paste = None;
+                self.sess.url_paste = None;
             }
         }
     }
 
     fn replace_url_text(&mut self, title: &str, cx: &mut Context<Self>) {
         let Some(r) = self.url_paste_range() else {
-            self.url_paste = None;
+            self.sess.url_paste = None;
             return;
         };
-        let Some(up) = self.url_paste.take() else { return };
+        let Some(up) = self.sess.url_paste.take() else { return };
         self.checkpoint(EditKind::Other);
         let title = title.trim().replace('\n', " ");
         let slot = self.slot_mut(up.slot);
         slot.delete(r.clone());
         slot.insert(r.start, &title, Marks { link: Some(up.url.clone()), ..Default::default() });
-        if self.head.slot() == up.slot && self.head.offset >= r.end {
-            self.head.offset = self.head.offset - r.len() + title.len();
-            self.anchor = self.head;
+        if self.core.head.slot() == up.slot && self.core.head.offset >= r.end {
+            self.core.head.offset = self.core.head.offset - r.len() + title.len();
+            self.core.anchor = self.core.head;
         }
         self.changed(cx);
     }
 
     pub fn url_paste_card(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.url_paste_range() else {
-            self.url_paste = None;
+            self.sess.url_paste = None;
             return;
         };
-        let Some(up) = self.url_paste.take() else { return };
+        let Some(up) = self.sess.url_paste.take() else { return };
         self.checkpoint(EditKind::Other);
         let bi = up.slot.0;
         let card = Block::new(BlockKind::LinkCard { url: up.url.clone() }, RichText::default());
@@ -109,9 +109,9 @@ impl Editor {
 
     /// 每帧检查：光标离开或抓取完成。
     pub(super) fn poll_url_paste(&mut self, cx: &mut Context<Self>) {
-        let Some(up) = &self.url_paste else { return };
-        if self.url_paste_range().is_none() || self.head.slot() != up.slot {
-            self.url_paste = None;
+        let Some(up) = &self.sess.url_paste else { return };
+        if self.url_paste_range().is_none() || self.core.head.slot() != up.slot {
+            self.sess.url_paste = None;
             return;
         }
         if up.waiting {
@@ -119,7 +119,7 @@ impl Editor {
                 CardState::Ready(c) if !c.title.trim().is_empty() => self.replace_url_text(&c.title, cx),
                 CardState::Loading => {}
                 _ => {
-                    self.url_paste = None;
+                    self.sess.url_paste = None;
                     cx.emit(EditorEvent::Toast("没能获取网页标题".into()));
                 }
             }
@@ -127,7 +127,7 @@ impl Editor {
     }
 
     pub(super) fn render_url_paste(&self, at: Point<Pixels>, t: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let up = self.url_paste.as_ref()?;
+        let up = self.sess.url_paste.as_ref()?;
         let waiting = up.waiting;
         let btn = |id: &'static str, label: &'static str, on: bool| {
             div()
@@ -159,7 +159,7 @@ impl Editor {
                         .shadow_md()
                         .child(div().px_1().text_size(px(11.5)).text_color(t.text_muted).child("显示为"))
                         .child(btn("up-link", "链接", !waiting).on_click(cx.listener(|this, _, _, cx| {
-                            this.url_paste = None;
+                            this.sess.url_paste = None;
                             cx.notify();
                         })))
                         .child(

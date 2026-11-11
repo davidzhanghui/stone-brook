@@ -393,7 +393,7 @@ impl SheetEditor {
             }
             let ext = p.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
             let dst = dir.join(format!("{}.{ext}", crate::store::new_uuid()));
-            if std::fs::copy(&p, &dst).is_ok() {
+            if crate::assets::import_copy(&p, &dst).is_ok() {
                 let size = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
                 refs.push(FileRef { name, path: dst.to_string_lossy().to_string(), size });
             }
@@ -908,8 +908,7 @@ impl SheetEditor {
         for (_, r, c, _, at, note) in &fired {
             let body = format!("{}{}{}", at.format("%Y/%m/%d %H:%M"), if note.is_empty() { "" } else { " · " }, note);
             let title = format!("表格提醒 {}{}", col_name(*c), r);
-            let script = format!("display notification \"{}\" with title \"{}\"", body.replace('"', "'"), title);
-            std::process::Command::new("osascript").arg("-e").arg(script).spawn().ok();
+            crate::sysui::notify(&title, &body);
             self.toast = Some(format!("⏰ {title}：{body}").into());
         }
         // 只记「已提醒」，不进撤销历史
@@ -921,8 +920,10 @@ impl SheetEditor {
                 }
             }
         }
-        self.model.borrow_mut().load_ext(serde_json::to_string(&e2).unwrap_or_default());
-        crate::objects::touch(&self.obj_id);
+        if let Ok(json) = serde_json::to_string(&e2) {
+            self.model.borrow_mut().load_ext(json);
+            crate::objects::touch(&self.obj_id);
+        }
         cx.notify();
     }
 

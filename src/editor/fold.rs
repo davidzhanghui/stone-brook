@@ -64,27 +64,27 @@ impl Editor {
     /// 改折叠状态。阅读模式下同步改快照：折叠是视图状态，不能被「回滚只读修改」还原。
     fn set_collapsed(&mut self, ix: usize, v: bool) {
         self.block_mut(ix).collapsed = v;
-        if let Some(b) = self.ro_doc.as_mut().and_then(|d| d.get_mut(ix)) {
+        if let Some(b) = self.sess.ro_doc.as_mut().and_then(|d| d.get_mut(ix)) {
             Arc::make_mut(b).collapsed = v;
         }
     }
 
     /// 聚焦根所在的块序号。
     pub(super) fn focus_ix(&self) -> Option<usize> {
-        let id = self.focus_root?;
+        let id = self.sess.focus_root?;
         self.content.blocks.iter().position(|b| b.id == id)
     }
 
     pub(super) fn hidden(&self) -> Rc<Vec<bool>> {
         // 块的增删改都会清掉缓存（见 mod.rs 的修改原语）；版本号只是双保险
-        let key = (self.version, self.focus_root);
-        if let Some((k, m)) = self.fold_cache.borrow().as_ref() {
+        let key = (self.version, self.sess.focus_root);
+        if let Some((k, m)) = self.caches.fold_cache.borrow().as_ref() {
             if *k == key {
                 return m.clone();
             }
         }
         let m = Rc::new(hidden_mask(&self.content.blocks, self.focus_ix()));
-        *self.fold_cache.borrow_mut() = Some((key, m.clone()));
+        *self.caches.fold_cache.borrow_mut() = Some((key, m.clone()));
         m
     }
 
@@ -104,7 +104,7 @@ impl Editor {
         }
         if let Some(root) = self.focus_ix() {
             if ix != root && !subtree(&self.content.blocks, root).contains(&ix) {
-                self.focus_root = None;
+                self.sess.focus_root = None;
             }
         }
         let mut changed = false;
@@ -130,10 +130,10 @@ impl Editor {
         let collapsed = !self.content.blocks[a].collapsed;
         self.set_collapsed(a, collapsed);
         // 光标在被收起的子项里：移到父项末尾
-        if collapsed && subtree(&self.content.blocks, a).contains(&self.head.block) {
+        if collapsed && subtree(&self.content.blocks, a).contains(&self.core.head.block) {
             let len = self.slot_len((a, 0));
-            self.head = Pos::new(a, 0, len);
-            self.anchor = self.head;
+            self.core.head = Pos::new(a, 0, len);
+            self.core.anchor = self.core.head;
         }
         // 折叠不进撤销栈（视图状态），但要保存
         self.version += 1;
@@ -144,7 +144,7 @@ impl Editor {
     }
 
     pub fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.head.block;
+        let ix = self.core.head.block;
         self.toggle_fold_at(ix, cx);
     }
 
@@ -152,20 +152,20 @@ impl Editor {
     pub fn focus_on(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(b) = self.content.blocks.get(ix).filter(|_| ix > 0) else { return };
         let id = b.id;
-        if self.focus_root == Some(id) {
-            self.focus_root = None;
+        if self.sess.focus_root == Some(id) {
+            self.sess.focus_root = None;
         } else {
-            self.focus_root = Some(id);
+            self.sess.focus_root = Some(id);
             if b.collapsed {
                 self.set_collapsed(ix, false);
                 self.version += 1;
                 self.dirty = true;
                 self.schedule_save(cx);
             }
-            if self.head.block != ix && !subtree(&self.content.blocks, ix).contains(&self.head.block) {
+            if self.core.head.block != ix && !subtree(&self.content.blocks, ix).contains(&self.core.head.block) {
                 let len = self.slot_len((ix, 0));
-                self.head = Pos::new(ix, 0, len);
-                self.anchor = self.head;
+                self.core.head = Pos::new(ix, 0, len);
+                self.core.anchor = self.core.head;
             }
         }
         self.list.reset(self.content.blocks.len());
@@ -174,17 +174,17 @@ impl Editor {
     }
 
     pub fn focus_block(&mut self, _: &FocusBlock, _: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.focus_ix().filter(|r| *r == self.head.block).unwrap_or(self.head.block);
+        let ix = self.focus_ix().filter(|r| *r == self.core.head.block).unwrap_or(self.core.head.block);
         self.focus_on(ix, cx);
     }
 
     pub fn exit_focus(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.focus_root.take().is_none() {
+        if self.sess.focus_root.take().is_none() {
             return false;
         }
         // 聚焦项可能在折叠的祖先里：退出后把光标所在处展开
-        self.fold_cache.get_mut().take();
-        if self.reveal_block(self.head.block) {
+        self.caches.fold_cache.get_mut().take();
+        if self.reveal_block(self.core.head.block) {
             self.schedule_save(cx);
         }
         self.list.reset(self.content.blocks.len());

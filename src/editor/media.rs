@@ -45,15 +45,15 @@ impl Editor {
             BlockKind::Image { crop, .. } => crop.unwrap_or((0., 0., 1., 1.)),
             _ => return,
         };
-        self.image_drag = None;
-        self.image_crop = Some(CropEdit { block: ix, rect, drag: None });
-        self.anchor = Pos::new(ix, 0, 0);
-        self.head = self.anchor;
+        self.sess.image_drag = None;
+        self.sess.image_crop = Some(CropEdit { block: ix, rect, drag: None });
+        self.core.anchor = Pos::new(ix, 0, 0);
+        self.core.head = self.core.anchor;
         cx.notify();
     }
 
     pub fn crop_begin_drag(&mut self, handle: CropHandle, at: Point<Pixels>, cx: &mut Context<Self>) {
-        if let Some(c) = self.image_crop.as_mut() {
+        if let Some(c) = self.sess.image_crop.as_mut() {
             c.drag = Some(CropDrag { handle, start: at, rect0: c.rect });
             cx.notify();
         }
@@ -61,13 +61,13 @@ impl Editor {
 
     /// 拖动裁剪框：按住的部位决定移动哪条边；整体移动时保持大小。
     pub fn crop_drag_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(c) = self.image_crop.as_ref() else { return };
+        let Some(c) = self.sess.image_crop.as_ref() else { return };
         let Some(d) = c.drag.as_ref() else { return };
         let Some(b) = self.frame.borrow().images.get(&c.block).copied() else { return };
         let (bw, bh) = (f32::from(b.size.width).max(1.), f32::from(b.size.height).max(1.));
         let (dx, dy) = (f32::from(at.x - d.start.x) / bw, f32::from(at.y - d.start.y) / bh);
         let rect = crop_drag_rect(d.handle, d.rect0, dx, dy);
-        if let Some(c) = self.image_crop.as_mut() {
+        if let Some(c) = self.sess.image_crop.as_mut() {
             c.rect = rect;
         }
         cx.notify();
@@ -75,7 +75,7 @@ impl Editor {
 
     /// 完成裁剪：框等于整图时视为「不裁剪」。
     pub fn crop_commit(&mut self, cx: &mut Context<Self>) {
-        let Some(c) = self.image_crop.take() else { return };
+        let Some(c) = self.sess.image_crop.take() else { return };
         let full = c.rect.0 < 0.002 && c.rect.1 < 0.002 && c.rect.2 > 0.998 && c.rect.3 > 0.998;
         let new = (!full).then_some(c.rect);
         let old = match &self.content.blocks.get(c.block).map(|b| &b.kind) {
@@ -90,14 +90,14 @@ impl Editor {
     }
 
     pub fn crop_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.image_crop.take().is_some() {
+        if self.sess.image_crop.take().is_some() {
             cx.notify();
         }
     }
 
     /// 裁剪框还原为整图（仍在裁剪模式里，点「完成」才生效）。
     pub fn crop_reset_full(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.image_crop.as_mut() {
+        if let Some(c) = self.sess.image_crop.as_mut() {
             c.rect = (0., 0., 1., 1.);
             cx.notify();
         }
@@ -107,7 +107,7 @@ impl Editor {
 
     pub fn open_image_preview(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(BlockKind::Image { path, .. }) = self.content.blocks.get(ix).map(|b| &b.kind) {
-            self.image_preview = Some(path.clone());
+            self.sess.image_preview = Some(path.clone());
             cx.notify();
         }
     }
@@ -224,15 +224,15 @@ impl Editor {
                 if !body.is_empty() {
                     this.add_comment(ix, &anchor_for_sub, &body, cx);
                 }
-                this.comment_input = None;
-                this.comment_open = Some(ix);
+                this.sess.comment_input = None;
+                this.sess.comment_open = Some(ix);
                 window.focus(&this.focus);
                 cx.notify();
             }
             InputEvent::Cancel => {
-                this.comment_input = None;
+                this.sess.comment_input = None;
                 if this.comments_on(ix) == 0 {
-                    this.comment_open = None;
+                    this.sess.comment_open = None;
                 }
                 window.focus(&this.focus);
                 cx.notify();
@@ -240,8 +240,8 @@ impl Editor {
             _ => {}
         });
         window.focus(&input.focus_handle(cx));
-        self.comment_open = Some(ix);
-        self.comment_input = Some(CommentInput { block: ix, anchor, input, _sub: sub });
+        self.sess.comment_open = Some(ix);
+        self.sess.comment_input = Some(CommentInput { block: ix, anchor, input, _sub: sub });
         cx.notify();
     }
 
@@ -251,14 +251,14 @@ impl Editor {
         self.sync_comment_blocks();
         self.store.add_comment(&self.doc_id, ix, anchor, body, &author);
         self.refresh_comments();
-        self.comment_open = Some(ix);
+        self.sess.comment_open = Some(ix);
         // 评论单独存表，正文没变：只提示，不触发文档变更 / 保存
         cx.emit(EditorEvent::Toast("已添加评论".into()));
         cx.notify();
     }
 
     pub fn toggle_comment_open(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.comment_open == Some(ix) {
+        if self.sess.comment_open == Some(ix) {
             self.close_comment_panel(cx);
         } else {
             self.open_comment_panel(ix, cx);
@@ -267,25 +267,25 @@ impl Editor {
 
     /// 打开某块的评论列表。重置悬停状态，避免列表刚出现就被鼠标移出逻辑收掉。
     pub fn open_comment_panel(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.comment_open = Some(ix);
+        self.sess.comment_open = Some(ix);
         self.refresh_comments();
         cx.notify();
     }
 
     pub fn close_comment_panel(&mut self, cx: &mut Context<Self>) {
-        self.comment_open = None;
+        self.sess.comment_open = None;
         cx.notify();
     }
 
     /// 关闭所有评论浮层（输入框 + 列表）。浮层只在点击浮层外部时关闭。
     pub(crate) fn dismiss_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.comment_input.is_none() && self.comment_open.is_none() {
+        if self.sess.comment_input.is_none() && self.sess.comment_open.is_none() {
             return;
         }
         // 只有焦点还在浮层输入框上时才收回，避免抢走用户正在点击的其它控件焦点
-        let input_focused = self.comment_input.as_ref().map(|ci| ci.input.read(cx).focus_handle(cx).is_focused(window)).unwrap_or(false);
-        self.comment_input = None;
-        self.comment_open = None;
+        let input_focused = self.sess.comment_input.as_ref().map(|ci| ci.input.read(cx).focus_handle(cx).is_focused(window)).unwrap_or(false);
+        self.sess.comment_input = None;
+        self.sess.comment_open = None;
         if input_focused {
             window.focus(&self.focus);
         }
@@ -307,9 +307,9 @@ impl Editor {
     /// 跳到某个块并把光标放上去（评论侧栏点击用）。
     pub fn jump_to_block(&mut self, ix: usize, cx: &mut Context<Self>) {
         let ix = ix.min(self.content.blocks.len().saturating_sub(1));
-        self.anchor = Pos::new(ix, 0, 0);
-        self.head = self.anchor;
-        self.comment_open = Some(ix);
+        self.core.anchor = Pos::new(ix, 0, 0);
+        self.core.head = self.core.anchor;
+        self.sess.comment_open = Some(ix);
         self.refresh_comments();
         self.scroll_to_block(ix, cx);
         cx.notify();
@@ -334,7 +334,7 @@ impl Editor {
     /// `sub` 为 `ime`（组字）/ `commit`（上屏）/ `raw`（指定 utf16 range 的 marked text）。
     #[cfg(feature = "dev")]
     pub fn test_comment_ime(&mut self, sub: &str, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ci) = self.comment_input.as_ref() else {
+        let Some(ci) = self.sess.comment_input.as_ref() else {
             eprintln!("cinput: 评论输入框没打开");
             return;
         };
@@ -407,7 +407,7 @@ impl Editor {
 
     /// 查看大图：盖住编辑区的暗色浮层，图片按窗口等比放大，点击任意处或 Esc 关闭。
     pub(super) fn render_image_preview(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let path = self.image_preview.clone()?;
+        let path = self.sess.image_preview.clone()?;
         let vp = window.viewport_size();
         let (vw, vh) = (f32::from(vp.width) - 120., f32::from(vp.height) - 120.);
         let (nw, nh) = self.image_size(&path).map(|(w, h)| (w.max(1) as f32, h.max(1) as f32)).unwrap_or((800., 600.));
@@ -435,7 +435,7 @@ impl Editor {
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.image_preview = None;
+                                this.sess.image_preview = None;
                                 cx.notify();
                             }),
                         ),
@@ -504,9 +504,9 @@ impl Editor {
     /// 上面是该块的评论列表，底部是回复框（点一下就地输入，↵ 发送、Esc 收起）。
     pub(super) fn render_comment_popover(&self, anchor: Option<Bounds<Pixels>>, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         const W: f32 = 320.;
-        let ix = self.comment_open.or(self.comment_input.as_ref().map(|c| c.block))?;
+        let ix = self.sess.comment_open.or(self.sess.comment_input.as_ref().map(|c| c.block))?;
         let list = self.comments_of(ix);
-        let input = self.comment_input.as_ref().filter(|c| c.block == ix);
+        let input = self.sess.comment_input.as_ref().filter(|c| c.block == ix);
         if list.is_empty() && input.is_none() {
             return None;
         }

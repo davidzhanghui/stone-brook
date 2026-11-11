@@ -35,7 +35,7 @@ enum Listing {
 }
 
 thread_local! {
-    static LISTINGS: RefCell<HashMap<String, Listing>> = RefCell::new(HashMap::new());
+    static LISTINGS: RefCell<crate::lru::Lru<String, Listing>> = RefCell::new(crate::lru::Lru::new(64));
     /// 每个文件块展开了哪些文件夹（查看状态，不写进文档）
     static EXPANDED: RefCell<HashMap<u64, HashSet<String>>> = RefCell::new(HashMap::new());
 }

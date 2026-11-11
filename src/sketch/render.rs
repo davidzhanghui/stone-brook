@@ -11,7 +11,6 @@ use roughr::core::{FillStyle, OpSet, OpSetType, OpType, Options};
 use roughr::generator::Generator;
 use roughr::Point2D;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -765,15 +764,7 @@ fn simplify(pts: &[Pt], eps: f32) -> Vec<Pt> {
     }
 }
 
-fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let l2 = dx * dx + dy * dy;
-    if l2 < 1e-9 {
-        return p.dist(a);
-    }
-    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0., 1.);
-    p.dist(pt(a.x + dx * t, a.y + dy * t))
-}
+use crate::canvas::math::dist_seg as seg_dist;
 
 // ───────────── 缓存 ─────────────
 
@@ -825,7 +816,7 @@ fn shape_hash(doc: &SketchDoc, e: &Element, dark: bool) -> u64 {
 }
 
 thread_local! {
-    static CACHE: RefCell<HashMap<String, (u64, Arc<Vec<Prim>>)>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<crate::lru::Lru<String, (u64, Arc<Vec<Prim>>)>> = RefCell::new(crate::lru::Lru::new(20000));
 }
 
 /// 带缓存的图元。
@@ -837,11 +828,7 @@ pub fn cached(doc: &SketchDoc, e: &Element, dark: bool) -> Arc<Vec<Prim>> {
     }
     let p = Arc::new(prims(doc, e, dark));
     CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 20000 {
-            c.clear();
-        }
-        c.insert(ck, (key, p.clone()));
+        c.borrow_mut().insert(ck, (key, p.clone()));
     });
     p
 }

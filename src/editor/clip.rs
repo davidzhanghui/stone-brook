@@ -78,7 +78,7 @@ impl Editor {
     pub fn cut(&mut self, a: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         let _ = a;
         self.copy(&Copy, window, cx);
-        let h = self.head;
+        let h = self.core.head;
         if self.has_selection() {
             self.checkpoint(EditKind::Other);
             self.delete_selection_inner();
@@ -152,7 +152,7 @@ impl Editor {
             if !plain && convert::looks_like_markdown(&t) {
                 blocks = convert::md_to_blocks(&t);
                 source = "markdown";
-            } else if t.contains('\n') && !self.content.blocks[self.head.block].kind.enter_is_newline() {
+            } else if t.contains('\n') && !self.content.blocks[self.core.head.block].kind.enter_is_newline() {
                 blocks = convert::plain_to_blocks(&t);
             } else {
                 blocks = vec![Block::new(BlockKind::Text, RichText::plain(t))];
@@ -187,7 +187,7 @@ impl Editor {
         if self.has_selection() {
             self.delete_selection_inner();
         }
-        let h = self.head;
+        let h = self.core.head;
         let target = self.content.blocks[h.block].kind.clone();
         let inline = blocks.len() == 1 && blocks[0].kind == BlockKind::Text;
         let flat = matches!(target, BlockKind::Title | BlockKind::Code { .. }) || target.is_multi();
@@ -201,12 +201,12 @@ impl Editor {
             }
             if target.is_void() {
                 self.insert_blocks(h.block + 1, vec![Block::new(BlockKind::Text, rich.clone())]);
-                self.head = Pos::new(h.block + 1, 0, rich.len());
+                self.core.head = Pos::new(h.block + 1, 0, rich.len());
             } else {
                 self.slot_mut(h.slot()).insert_rich(h.offset, &rich);
-                self.head.offset += rich.len();
+                self.core.head.offset += rich.len();
             }
-            self.anchor = self.head;
+            self.core.anchor = self.core.head;
             self.changed(cx);
             self.reveal_head();
             return;
@@ -219,8 +219,8 @@ impl Editor {
         if target.is_void() {
             let n = blocks.len();
             self.insert_blocks(h.block + 1, blocks);
-            self.head = self.slot_end(h.block + n);
-            self.anchor = self.head;
+            self.core.head = self.slot_end(h.block + n);
+            self.core.anchor = self.core.head;
             self.changed(cx);
             self.reveal_head();
             return;
@@ -253,20 +253,20 @@ impl Editor {
             if !tail.is_empty() {
                 self.block_mut(last).text.append(&tail);
             }
-            self.head = Pos::new(last, 0, len);
+            self.core.head = Pos::new(last, 0, len);
         } else if !tail.is_empty() || last + 1 >= self.content.blocks.len() {
             self.insert_blocks(last + 1, vec![Block::new(BlockKind::Text, tail)]);
-            self.head = Pos::new(last + 1, 0, 0);
+            self.core.head = Pos::new(last + 1, 0, 0);
         } else {
-            self.head = self.slot_end(last);
+            self.core.head = self.slot_end(last);
         }
         // 原块被清空且原本就是空正文（例如在空行粘贴了图片），把它删掉
         if self.content.blocks[h.block].kind == BlockKind::Text && self.content.blocks[h.block].text.is_empty() && h.block > 0 && n > 0 {
             self.remove_blocks(h.block..h.block + 1);
-            self.head.block -= 1;
+            self.core.head.block -= 1;
         }
-        self.head = self.clamp(self.head);
-        self.anchor = self.head;
+        self.core.head = self.clamp(self.core.head);
+        self.core.anchor = self.core.head;
         self.changed(cx);
         self.reveal_head();
     }
@@ -464,7 +464,7 @@ impl Editor {
                         if multi {
                             blocks.push(Block::new(BlockKind::Heading { level: 3 }, RichText::plain(page.name)));
                         }
-                        let id = crate::objects::create("board", Some(crate::objects::ObjData::Board(std::sync::Arc::new(page.doc))));
+                        let id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(std::sync::Arc::new(page.doc))));
                         blocks.push(Block::new(BlockKind::Embed { kind: "board".into(), id }, RichText::default()));
                     }
                 }
@@ -492,7 +492,7 @@ pub(super) fn copy_asset(src: &std::path::Path, assets: &std::path::Path) -> Opt
     let dir = assets.join(&crate::store::new_uuid()[..8]);
     std::fs::create_dir_all(&dir).ok()?;
     let dst = dir.join(name);
-    std::fs::copy(src, &dst).ok()?;
+    crate::assets::import_copy(src, &dst).ok()?;
     Some(dst.to_string_lossy().to_string())
 }
 

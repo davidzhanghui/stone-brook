@@ -46,7 +46,9 @@ actions!(
         Present,
         ToggleReadMode,
         ShowShortcuts,
-        ExportDocxXml
+        ExportDocxXml,
+        CheckUpdate,
+        InstallUpdate
     ]
 );
 
@@ -99,6 +101,8 @@ pub struct Workspace {
     base_picker: Option<Vec<(String, String, usize)>>,
     template_list: Vec<(String, String, String)>,
     settings_open: bool,
+    /// 已经提示过「新版本已下载」的版本号
+    update_notified: Option<String>,
     /// 右侧评论侧栏是否展开
     comments_open: bool,
     /// 设置面板里的「评论作者名」输入框
@@ -135,40 +139,38 @@ fn window_defer_open(ws: &mut Workspace, kind: String, id: String, cx: &mut Cont
 impl Workspace {
     pub fn open_embed(&mut self, kind: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |e, cx| e.save_now(cx));
-        match kind {
-            "board" | "flow" => {
-                let v = cx.new(|cx| crate::board::view::BoardEditor::new(id.to_string(), cx));
-                let sub = cx.subscribe_in(&v, window, |this, _, _: &crate::board::view::BoardEvent, window, cx| this.close_embed(window, cx));
-                let fh = v.focus_handle(cx);
-                window.focus(&fh);
-                self.embed = Some((v.into(), fh, sub));
-            }
-            "base" => {
-                let v = cx.new(|cx| crate::base::editor::BaseEditor::new(id.to_string(), window, cx));
-                let sub = cx.subscribe_in(&v, window, |this, _, _: &crate::base::editor::BaseEvent, window, cx| this.close_embed(window, cx));
-                let fh = v.focus_handle(cx);
-                window.focus(&fh);
-                self.embed = Some((v.into(), fh, sub));
-            }
-            "sketch" => {
-                let v = cx.new(|cx| crate::sketch::view::SketchEditor::new(id.to_string(), cx));
-                let sub = cx.subscribe_in(&v, window, |this, _, _: &crate::sketch::view::SketchEvent, window, cx| this.close_embed(window, cx));
-                let fh = v.focus_handle(cx);
-                window.focus(&fh);
-                self.embed = Some((v.into(), fh, sub));
-            }
-            "sheet" => {
-                let v = cx.new(|cx| crate::sheet::SheetEditor::new(id.to_string(), window, cx));
-                let sub = cx.subscribe_in(&v, window, |this, _, _: &crate::sheet::SheetEvent, window, cx| this.close_embed(window, cx));
-                let fh = v.focus_handle(cx);
-                window.focus(&fh);
-                self.embed = Some((v.into(), fh, sub));
-            }
-            _ => {
-                self.show_toast("暂不支持的对象类型".into(), cx);
+        // 读不出来（不存在 / 读失败 / 损坏）的对象不进编辑器：否则会打开一份空白默认内容，用户以为数据没了，
+        // 而且在空白内容上做的修改也保存不了。损坏的原始数据已在 `objects::load` 里备份。
+        match crate::objects::load(id) {
+            Ok(_) | Err(crate::objects::LoadError::NoStore) => {}
+            Err(e) => {
+                self.show_toast_for(e.message(), 8000, cx);
+                cx.notify();
+                return;
             }
         }
+        use crate::objects::ObjKind;
+        match ObjKind::parse(kind) {
+            Some(ObjKind::Board | ObjKind::Flow) => self.mount_embed::<crate::board::view::BoardEditor>(id, window, cx),
+            Some(ObjKind::Sketch) => self.mount_embed::<crate::sketch::view::SketchEditor>(id, window, cx),
+            Some(ObjKind::Sheet) => self.mount_embed::<crate::sheet::SheetEditor>(id, window, cx),
+            Some(ObjKind::Base) => self.mount_embed::<crate::base::editor::BaseEditor>(id, window, cx),
+            None => self.show_toast("暂不支持的对象类型".into(), cx),
+        }
         cx.notify();
+    }
+
+    /// 打开一个全屏嵌入编辑器：新建视图、关闭事件回到文档、抢焦点。
+    fn mount_embed<V: crate::embed::EmbedEditor>(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let v = cx.new(|cx| V::open(id.to_string(), window, cx));
+        let sub = cx.subscribe_in(&v, window, |this, _, ev: &V::Event, window, cx| {
+            if V::closes(ev) {
+                this.close_embed(window, cx);
+            }
+        });
+        let fh = v.focus_handle(cx);
+        window.focus(&fh);
+        self.embed = Some((v.into(), fh, sub));
     }
 
     /// 以思维导图查看当前文档：标题为根、各级标题与列表项为分支，生成一个临时画板；
@@ -177,7 +179,7 @@ impl Workspace {
         self.editor.update(cx, |e, cx| e.save_now(cx));
         let lines = doc_outline(&self.editor.read(cx).content.blocks);
         let doc = crate::board::model::BoardDoc::with_mind(Some(&lines), 1, theme(cx).dark);
-        let id = crate::objects::create("board", Some(crate::objects::ObjData::Board(std::sync::Arc::new(doc))));
+        let id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(std::sync::Arc::new(doc))));
         let v = cx.new(|cx| {
             let mut b = crate::board::view::BoardEditor::new(id.clone(), cx);
             b.preview = true;
@@ -254,7 +256,7 @@ impl Workspace {
                 b
             })
             .collect();
-        self.store.save_template(&name, &crate::model::blocks_to_json(&blocks));
+        self.store.save_template(&name, &crate::model::try_blocks_to_json(&blocks).unwrap_or_default());
         self.show_toast(format!("已保存为模板「{name}」"), cx);
     }
 
@@ -612,6 +614,7 @@ impl Workspace {
             base_picker: None,
             template_list: vec![],
             settings_open: false,
+            update_notified: None,
             comments_open: false,
             author_input,
             palette: None,
@@ -658,13 +661,24 @@ impl Workspace {
         })
     }
 
-    /// 定期取走写库失败的原因并提示（写入在后台线程，失败时界面层不会立刻知道）。
+    /// 定期取走存储错误并提示（写入在后台线程，失败时界面层不会立刻知道；读失败、对象损坏也走这里）。
     fn poll_store_errors(cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| loop {
             cx.background_executor().timer(Duration::from_millis(1500)).await;
             let alive = this.update(cx, |this, cx| {
                 if let Some(e) = this.store.take_error() {
-                    this.show_toast(format!("保存失败：{e}"), cx);
+                    // 消息自带上下文（保存失败 / 读取失败 / 对象损坏…），多停留一会儿
+                    this.show_toast_for(e, 6000, cx);
+                }
+                if crate::updater::take_changed() {
+                    // 后台自动下载好新版本：提示一次
+                    if let crate::updater::State::Ready { release, .. } = crate::updater::state() {
+                        if this.update_notified.as_deref() != Some(release.version.as_str()) {
+                            this.update_notified = Some(release.version.clone());
+                            this.show_toast_for(format!("新版本 {} 已下载好：设置 → 更新 里点「重启并安装」，或下次退出时自动安装", release.version), 8000, cx);
+                        }
+                    }
+                    cx.notify();
                 }
             });
             if alive.is_err() {
@@ -907,7 +921,7 @@ impl Workspace {
         self.editor.update(cx, |e, cx| {
             e.show_perf = !e.show_perf;
             crate::base::stress::SHOW.store(e.show_perf, std::sync::atomic::Ordering::Relaxed);
-            e.frame_times.clear();
+            e.caches.frame_times.clear();
             cx.notify();
         });
         if let Some(v) = self.embed_view() {
@@ -925,7 +939,7 @@ impl Workspace {
         self.create_doc(None, content, window, cx);
         self.editor.update(cx, |e, cx| {
             e.show_perf = true;
-            e.frame_times.clear();
+            e.caches.frame_times.clear();
             cx.notify();
         });
         self.show_toast(format!("已生成 {} 字 / {} 块，用时 {}ms · 滚动试试", fmt_num(n), fmt_num(blocks), t0.elapsed().as_millis()), cx);
@@ -2340,6 +2354,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::cycle_theme))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &About, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &CheckUpdate, _, cx| {
+                this.show_settings(cx);
+                crate::updater::run(true, true);
+            }))
+            .on_action(cx.listener(|this, _: &InstallUpdate, _, cx| this.install_update(cx)))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" && (this.settings_open || this.template_picker.is_some() || this.base_picker.is_some()) {
                     this.settings_open = false;

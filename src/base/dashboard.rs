@@ -383,44 +383,7 @@ impl BaseEditor {
                     .into_any_element()
             }
             "text" => div().flex_1().px(px(16.)).text_size(px(14.)).child(w.text.clone()).into_any_element(),
-            "pivot" => {
-                let head = div()
-                    .flex()
-                    .flex_row()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(div().w(px(120.)).flex_none().px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child(""))
-                    .children(data.cols.iter().map(|c| div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child(c.clone())));
-                let rows = data.labels.iter().enumerate().map(|(i, l)| {
-                    div()
-                        .flex()
-                        .flex_row()
-                        .h(px(28.))
-                        .items_center()
-                        .border_b_1()
-                        .border_color(t.border)
-                        .child(
-                            div().w(px(120.)).flex_none().px(px(8.)).text_size(px(12.5)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(l.clone()),
-                        )
-                        .children(
-                            data.matrix
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|v| div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.5)).child(short(v))),
-                        )
-                        .child(div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(short(data.values[i])))
-                });
-                div()
-                    .id(SharedString::from(format!("pv-{}", w.id)))
-                    .flex_1()
-                    .px(px(12.))
-                    .overflow_scroll()
-                    .child(head.child(div().w(px(90.)).px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child("合计")))
-                    .children(rows)
-                    .into_any_element()
-            }
+            "pivot" => self.render_widget_part_2(w, t, &data),
             k if data.labels.is_empty() => div()
                 .flex_1()
                 .flex()
@@ -594,66 +557,7 @@ impl BaseEditor {
             .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .child(
-                div()
-                    .id(SharedString::from(format!("wh-{}", w.id)))
-                    .h(px(40.))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(14.))
-                    .gap(px(6.))
-                    .cursor_move()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(w.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("wset-{}", w.id)))
-                            .invisible()
-                            .group_hover("wdg", |s| s.visible())
-                            .cursor_pointer()
-                            .child(icon("settings", 14., t.text_muted))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.open_popup(Popup::Widget(id1.clone()), ev.position, cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("wdel-{}", w.id)))
-                            .invisible()
-                            .group_hover("wdg", |s| s.visible())
-                            .cursor_pointer()
-                            .child(icon("trash", 14., t.text_muted))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    let id = id2.clone();
-                                    this.update_dash(cx, false, move |d| d.widgets.retain(|w| w.id != id));
-                                }),
-                            ),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                            this.drag = Some(Drag::Widget { id: id3.clone(), resize: false, start: ev.position, orig: pos });
-                            cx.notify();
-                        }),
-                    ),
-            )
+            .child(self.render_widget_part(w, t, cx, id1.clone(), id2.clone(), id3.clone(), pos))
             .child(body)
             .child(
                 div()
@@ -674,6 +578,99 @@ impl BaseEditor {
                             cx.notify();
                         }),
                     ),
+            )
+            .into_any_element()
+    }
+    /// 从 `render_widget` 拆出。
+    fn render_widget_part_2(&self, w: &Widget, t: &Theme, data: &WData) -> AnyElement {
+        let head = div()
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(t.border)
+            .child(div().w(px(120.)).flex_none().px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child(""))
+            .children(data.cols.iter().map(|c| div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child(c.clone())));
+        let rows = data.labels.iter().enumerate().map(|(i, l)| {
+            div()
+                .flex()
+                .flex_row()
+                .h(px(28.))
+                .items_center()
+                .border_b_1()
+                .border_color(t.border)
+                .child(div().w(px(120.)).flex_none().px(px(8.)).text_size(px(12.5)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(l.clone()))
+                .children(
+                    data.matrix
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|v| div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.5)).child(short(v))),
+                )
+                .child(div().w(px(90.)).flex_none().px(px(8.)).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).child(short(data.values[i])))
+        });
+        div()
+            .id(SharedString::from(format!("pv-{}", w.id)))
+            .flex_1()
+            .px(px(12.))
+            .overflow_scroll()
+            .child(head.child(div().w(px(90.)).px(px(8.)).text_size(px(12.)).text_color(t.text_muted).child("合计")))
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// 从 `render_widget` 拆出。
+    fn render_widget_part(&self, w: &Widget, t: &Theme, cx: &mut Context<Self>, id1: String, id2: String, id3: String, pos: (u8, u8, u8, u8)) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("wh-{}", w.id)))
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(px(14.))
+            .gap(px(6.))
+            .cursor_move()
+            .child(
+                div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(w.title.clone()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("wset-{}", w.id)))
+                    .invisible()
+                    .group_hover("wdg", |s| s.visible())
+                    .cursor_pointer()
+                    .child(icon("settings", 14., t.text_muted))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_popup(Popup::Widget(id1.clone()), ev.position, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("wdel-{}", w.id)))
+                    .invisible()
+                    .group_hover("wdg", |s| s.visible())
+                    .cursor_pointer()
+                    .child(icon("trash", 14., t.text_muted))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let id = id2.clone();
+                            this.update_dash(cx, false, move |d| d.widgets.retain(|w| w.id != id));
+                        }),
+                    ),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    this.drag = Some(Drag::Widget { id: id3.clone(), resize: false, start: ev.position, orig: pos });
+                    cx.notify();
+                }),
             )
             .into_any_element()
     }

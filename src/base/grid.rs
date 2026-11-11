@@ -872,85 +872,11 @@ impl BaseEditor {
             let h = gl.row_y[i + 1] - gl.row_y[i];
             match gl.rows[i].clone() {
                 GRow::Group { depth, path, label, color, count, fid, collapsed, rids } => {
-                    let fname = self.field(&fid).map(|f| f.name).unwrap_or_default();
-                    let p = path.clone();
-                    // 分组小计：按底部统计栏的配置，算这一组的记录
-                    let subtotals: Vec<String> = fields
-                        .iter()
-                        .filter_map(|f| {
-                            let k = v.stats.get(&f.id).filter(|k| !k.is_empty() && k.as_str() != "count")?;
-                            let s = self.b().stat(&self.tid, &rids, &f.id, k);
-                            (!s.is_empty()).then(|| format!("{}：{s}", f.name))
-                        })
-                        .collect();
-                    layer = layer.child(
-                        div()
-                            .id(SharedString::from(format!("g-{path}")))
-                            .absolute()
-                            .top(px(y))
-                            .left_0()
-                            .w(px(vw))
-                            .h(px(h))
-                            .pl(px(12. + depth as f32 * 20.))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.))
-                            .bg(t.sidebar_bg)
-                            .border_b_1()
-                            .border_color(t.border)
-                            .cursor_pointer()
-                            .child(icon(if collapsed { "chevron-right" } else { "chevron-down" }, 14., t.text_secondary))
-                            .child(div().text_size(px(12.)).text_color(t.text_muted).child(fname))
-                            .child(match color {
-                                Some(c) => tag(label, c, t).into_any_element(),
-                                None => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(label).into_any_element(),
-                            })
-                            .child(div().text_size(px(12.)).text_color(t.text_muted).child(count.to_string()))
-                            .when(!subtotals.is_empty(), |d| {
-                                d.child(div().ml(px(16.)).text_size(px(12.)).text_color(t.text_secondary).child(subtotals.join("　")))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let p = p.clone();
-                                this.update_view(cx, |v| {
-                                    if v.collapsed.contains(&p) {
-                                        v.collapsed.retain(|x| x != &p);
-                                    } else {
-                                        v.collapsed.push(p);
-                                    }
-                                })
-                            })),
-                    );
+                    layer =
+                        self.render_grid_group(t, cx, collapsed, color, count, depth, &fid, &fields, h, label.clone(), layer, &path, &rids, v.clone(), vw, y);
                 }
                 GRow::Add { depth, preset } => {
-                    layer = layer.child(
-                        div()
-                            .id(("add-row", i))
-                            .absolute()
-                            .top(px(y))
-                            .left_0()
-                            .w(px((gl.total_w() - PLUS_W).min(vw)))
-                            .h(px(h))
-                            .pl(px(16. + depth as f32 * 20.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .border_b_1()
-                            .border_color(t.border)
-                            .text_size(px(13.))
-                            .text_color(t.text_muted)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hover).text_color(t.text_secondary))
-                            .child(icon("plus", 14., t.text_muted))
-                            .child("新增记录")
-                            .on_click(cx.listener(move |this, _, w, cx| {
-                                if let Some(rid) = this.add_record(preset.clone(), None, cx) {
-                                    let fid = this.gl.cols.first().cloned().unwrap_or_default();
-                                    this.sel = Some(Sel { rid: rid.clone(), fid: fid.clone(), arid: rid, afid: fid });
-                                    w.focus(&this.focus);
-                                }
-                            })),
-                    );
+                    layer = self.render_grid_add(t, cx, depth, &gl, h, i, layer, preset.clone(), vw, y);
                 }
                 GRow::Rec { rid, depth, n, tdepth, kids, matched } => {
                     let selected_row = sel_recs.contains(&rid) || checked.contains(&rid);
@@ -1458,6 +1384,120 @@ impl BaseEditor {
             Some(b) => div().size_full().flex().flex_col().child(b).child(div().flex_1().min_h(px(0.)).child(grid)).into_any_element(),
             None => grid.into_any_element(),
         }
+    }
+    /// 从 `render_grid` 拆出。
+    fn render_grid_group(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        collapsed: bool,
+        color: Option<u8>,
+        count: usize,
+        depth: usize,
+        fid: &str,
+        fields: &[Field],
+        h: f32,
+        label: String,
+        mut layer: Div,
+        path: &String,
+        rids: &[String],
+        v: View,
+        vw: f32,
+        y: f32,
+    ) -> Div {
+        let fname = self.field(fid).map(|f| f.name).unwrap_or_default();
+        let p = path.clone();
+        // 分组小计：按底部统计栏的配置，算这一组的记录
+        let subtotals: Vec<String> = fields
+            .iter()
+            .filter_map(|f| {
+                let k = v.stats.get(&f.id).filter(|k| !k.is_empty() && k.as_str() != "count")?;
+                let s = self.b().stat(&self.tid, rids, &f.id, k);
+                (!s.is_empty()).then(|| format!("{}：{s}", f.name))
+            })
+            .collect();
+        layer = layer.child(
+            div()
+                .id(SharedString::from(format!("g-{path}")))
+                .absolute()
+                .top(px(y))
+                .left_0()
+                .w(px(vw))
+                .h(px(h))
+                .pl(px(12. + depth as f32 * 20.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .bg(t.sidebar_bg)
+                .border_b_1()
+                .border_color(t.border)
+                .cursor_pointer()
+                .child(icon(if collapsed { "chevron-right" } else { "chevron-down" }, 14., t.text_secondary))
+                .child(div().text_size(px(12.)).text_color(t.text_muted).child(fname))
+                .child(match color {
+                    Some(c) => tag(label, c, t).into_any_element(),
+                    None => div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(label).into_any_element(),
+                })
+                .child(div().text_size(px(12.)).text_color(t.text_muted).child(count.to_string()))
+                .when(!subtotals.is_empty(), |d| d.child(div().ml(px(16.)).text_size(px(12.)).text_color(t.text_secondary).child(subtotals.join("　"))))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let p = p.clone();
+                    this.update_view(cx, |v| {
+                        if v.collapsed.contains(&p) {
+                            v.collapsed.retain(|x| x != &p);
+                        } else {
+                            v.collapsed.push(p);
+                        }
+                    })
+                })),
+        );
+        layer
+    }
+
+    /// 从 `render_grid` 拆出。
+    fn render_grid_add(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        depth: usize,
+        gl: &GridLayout,
+        h: f32,
+        i: usize,
+        mut layer: Div,
+        preset: Vec<(String, Value)>,
+        vw: f32,
+        y: f32,
+    ) -> Div {
+        layer = layer.child(
+            div()
+                .id(("add-row", i))
+                .absolute()
+                .top(px(y))
+                .left_0()
+                .w(px((gl.total_w() - PLUS_W).min(vw)))
+                .h(px(h))
+                .pl(px(16. + depth as f32 * 20.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .border_b_1()
+                .border_color(t.border)
+                .text_size(px(13.))
+                .text_color(t.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover).text_color(t.text_secondary))
+                .child(icon("plus", 14., t.text_muted))
+                .child("新增记录")
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    if let Some(rid) = this.add_record(preset.clone(), None, cx) {
+                        let fid = this.gl.cols.first().cloned().unwrap_or_default();
+                        this.sel = Some(Sel { rid: rid.clone(), fid: fid.clone(), arid: rid, afid: fid });
+                        w.focus(&this.focus);
+                    }
+                })),
+        );
+        layer
     }
 
     /// 字段编组：表头上方一行编组名（跨过组内的列）。

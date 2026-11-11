@@ -29,7 +29,7 @@ impl Editor {
     }
 
     fn right_pos(&self) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         let len = self.slot_len(h.slot());
         if h.offset < len {
             let t = &self.slot_text(h.slot()).unwrap().text;
@@ -69,7 +69,7 @@ impl Editor {
     }
 
     fn left_pos(&self) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         if h.offset > 0 {
             let t = &self.slot_text(h.slot()).unwrap().text;
             let p = t[..h.offset].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
@@ -83,7 +83,7 @@ impl Editor {
     }
 
     pub(super) fn word_left_pos(&self) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         if h.offset == 0 {
             return self.left_pos();
         }
@@ -94,7 +94,7 @@ impl Editor {
     }
 
     fn word_right_pos(&self) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         let len = self.slot_len(h.slot());
         if h.offset >= len {
             return self.right_pos();
@@ -112,7 +112,7 @@ impl Editor {
 
     /// 视觉行的行首 / 行尾（考虑自动换行）。
     pub(super) fn line_edge(&self, end: bool) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         let frame = self.frame.borrow();
         let len = self.slot_len(h.slot());
         if let Some(layout) = frame.layouts.get(&h.slot()) {
@@ -163,13 +163,13 @@ impl Editor {
     }
 
     fn vertical_pos(&mut self, down: bool) -> Pos {
-        let h = self.head;
+        let h = self.core.head;
         let frame = self.frame.borrow();
         let layout = frame.layouts.get(&h.slot()).cloned();
         let hmap = frame.maps.get(&h.slot()).cloned();
         let hd = hmap.as_ref().map_or(h.offset, |m| m.m2d(h.offset));
         let (x, y, lh) = match layout.as_ref().and_then(|l| l.position_for_index(hd).map(|p| (l, p))) {
-            Some((l, p)) => (self.goal_x.unwrap_or(p.x), p.y, l.line_height()),
+            Some((l, p)) => (self.core.goal_x.unwrap_or(p.x), p.y, l.line_height()),
             None => {
                 drop(frame);
                 let target = self.vertical_neighbor(h, down);
@@ -189,7 +189,7 @@ impl Editor {
             };
             let ix = hmap.as_ref().map_or(ix, |m| m.d2m(ix));
             drop(frame);
-            self.goal_x = goal;
+            self.core.goal_x = goal;
             return self.clamp(Pos { offset: ix, ..h });
         }
         let Some(slot) = self.vertical_neighbor(h, down) else {
@@ -199,7 +199,7 @@ impl Editor {
         let target = frame.layouts.get(&slot).cloned();
         let tmap = frame.maps.get(&slot).cloned();
         drop(frame);
-        self.goal_x = goal;
+        self.core.goal_x = goal;
         match target {
             Some(t) => {
                 let tb = t.bounds();
@@ -216,7 +216,7 @@ impl Editor {
 
     fn mv(&mut self, p: Pos, extend: bool, cx: &mut Context<Self>) {
         if !extend {
-            self.goal_x = None;
+            self.core.goal_x = None;
         }
         self.set_cursor(p, extend, cx);
     }
@@ -298,13 +298,13 @@ impl Editor {
         }
         if self.has_selection() {
             let p = self.sel().0;
-            self.anchor = p;
-            self.head = p;
+            self.core.anchor = p;
+            self.core.head = p;
         }
         let p = self.vertical_pos(false);
-        let g = self.goal_x;
+        let g = self.core.goal_x;
         self.set_cursor(p, false, cx);
-        self.goal_x = g;
+        self.core.goal_x = g;
     }
 
     pub fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
@@ -321,12 +321,12 @@ impl Editor {
         }
         if self.has_selection() {
             let p = self.sel().1;
-            self.anchor = p;
-            self.head = p;
+            self.core.anchor = p;
+            self.core.head = p;
         }
         // 在最后一个非正文块的末尾按 ↓，自动补一个空段落，方便「跳出」代码块 / 表格
         let last = self.content.blocks.len() - 1;
-        let h = self.head;
+        let h = self.core.head;
         if h.block == last && self.content.blocks[last].kind != BlockKind::Text && h.block > 0 {
             let at_end = self.vertical_pos(true) == h || self.content.blocks[last].kind.is_void();
             if at_end {
@@ -338,23 +338,23 @@ impl Editor {
             }
         }
         let p = self.vertical_pos(true);
-        let g = self.goal_x;
+        let g = self.core.goal_x;
         self.set_cursor(p, false, cx);
-        self.goal_x = g;
+        self.core.goal_x = g;
     }
 
     pub fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         let p = self.vertical_pos(false);
-        let g = self.goal_x;
+        let g = self.core.goal_x;
         self.set_cursor(p, true, cx);
-        self.goal_x = g;
+        self.core.goal_x = g;
     }
 
     pub fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         let p = self.vertical_pos(true);
-        let g = self.goal_x;
+        let g = self.core.goal_x;
         self.set_cursor(p, true, cx);
-        self.goal_x = g;
+        self.core.goal_x = g;
     }
 
     // ───────────── 命中测试 ─────────────
@@ -414,9 +414,9 @@ impl Editor {
             if let Ok(i) = layout.index_for_position(ev.position) {
                 if let Some(start) = m.formula_at(i) {
                     let tex = self.slot_text((b, c)).and_then(|t| t.math_spans().into_iter().find(|f| f.0 == start)).map(|f| f.1).unwrap_or_default();
-                    self.head = Pos::new(b, c, start);
-                    self.anchor = self.head;
-                    self.inline_math_at = Some((b, c, start));
+                    self.core.head = Pos::new(b, c, start);
+                    self.core.anchor = self.core.head;
+                    self.sess.inline_math_at = Some((b, c, start));
                     self.open_prop_edit(b, "inline_math", &tex, "编辑 LaTeX，回车确认，留空删除", ev.position, window, cx);
                     return;
                 }
@@ -445,8 +445,8 @@ impl Editor {
     }
 
     pub fn mouse_select(&mut self, p: Pos, clicks: usize, shift: bool, cx: &mut Context<Self>) {
-        self.selecting = true;
-        self.goal_x = None;
+        self.core.selecting = true;
+        self.core.goal_x = None;
         match clicks {
             2 => {
                 let t = self.slot_text(p.slot()).map(|t| t.text.clone()).unwrap_or_default();
@@ -460,11 +460,11 @@ impl Editor {
                         }
                     }
                 }
-                self.anchor = Pos { offset: s, ..p };
+                self.core.anchor = Pos { offset: s, ..p };
                 self.set_cursor(Pos { offset: e, ..p }, true, cx);
             }
             n if n >= 3 => {
-                self.anchor = Pos { offset: 0, ..p };
+                self.core.anchor = Pos { offset: 0, ..p };
                 let len = self.slot_len(p.slot());
                 self.set_cursor(Pos { offset: len, ..p }, true, cx);
             }
@@ -473,12 +473,12 @@ impl Editor {
     }
 
     pub fn root_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.diagram_drag.is_some() && ev.pressed_button == Some(MouseButton::Left) {
+        if self.sess.diagram_drag.is_some() && ev.pressed_button == Some(MouseButton::Left) {
             self.diagram_drag_move(ev.position, cx);
             return;
         }
         // 表格列宽
-        if self.table_col_drag.is_some() {
+        if self.sess.table_col_drag.is_some() {
             if ev.pressed_button == Some(MouseButton::Left) {
                 self.drag_table_col(ev.position.x, cx);
             } else {
@@ -488,7 +488,7 @@ impl Editor {
             return;
         }
         // 图片等比缩放
-        if let Some(d) = self.image_drag.as_mut() {
+        if let Some(d) = self.sess.image_drag.as_mut() {
             if ev.pressed_button == Some(MouseButton::Left) {
                 let dx = f32::from(ev.position.x - d.start_px.x);
                 d.width = (d.start_w + dx * d.dir).clamp(48., 2400.);
@@ -499,20 +499,20 @@ impl Editor {
             return;
         }
         // 裁剪框
-        if self.image_crop.as_ref().is_some_and(|c| c.drag.is_some()) {
+        if self.sess.image_crop.as_ref().is_some_and(|c| c.drag.is_some()) {
             if ev.pressed_button == Some(MouseButton::Left) {
                 self.crop_drag_move(ev.position, cx);
-            } else if let Some(c) = self.image_crop.as_mut() {
+            } else if let Some(c) = self.sess.image_crop.as_mut() {
                 c.drag = None;
             }
             return;
         }
-        if !self.selecting || ev.pressed_button != Some(MouseButton::Left) {
+        if !self.core.selecting || ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
         if let Some(p) = self.hit_test(ev.position) {
-            if p != self.head {
-                self.head = p;
+            if p != self.core.head {
+                self.core.head = p;
                 self.touch_activity();
                 cx.notify();
             }
@@ -532,18 +532,18 @@ impl Editor {
         self.diagram_drag_end(cx);
         self.end_table_col_drag(cx);
         self.end_image_drag(cx);
-        if let Some(c) = self.image_crop.as_mut() {
+        if let Some(c) = self.sess.image_crop.as_mut() {
             c.drag = None;
         }
-        if self.selecting {
-            self.selecting = false;
+        if self.core.selecting {
+            self.core.selecting = false;
             cx.notify();
         }
     }
 
     /// 松开缩放手柄：只点了一下没拖时，不把「自动宽度」钉成固定值，也不记撤销。
     fn end_image_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(d) = self.image_drag.take() else { return };
+        let Some(d) = self.sess.image_drag.take() else { return };
         let w = d.width.round();
         if (w - d.start_w.round()).abs() >= 1. {
             self.set_image_width(d.block, Some(w), cx);

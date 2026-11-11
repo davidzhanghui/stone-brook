@@ -7,7 +7,6 @@ use crate::webview;
 use gpui::{App, AsyncApp};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +26,7 @@ struct Meta {
 
 #[derive(Default)]
 struct Cache {
-    map: HashMap<String, MathState>,
+    map: crate::lru::Lru<String, MathState>,
     queue: Vec<Job>,
     running: bool,
 }

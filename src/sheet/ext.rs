@@ -583,7 +583,18 @@ impl SheetEditor {
         if s == &SheetX::default() {
             e.sheets.remove(&id);
         }
-        let json = if e == Ext::default() { String::new() } else { serde_json::to_string(&e).unwrap_or_default() };
+        let json = if e == Ext::default() {
+            String::new()
+        } else {
+            match serde_json::to_string(&e) {
+                Ok(j) => j,
+                Err(err) => {
+                    // 序列化失败时保留原扩展数据，不能写空串（会清掉所有下拉 / 备注 / 图片）
+                    self.toast = Some(format!("修改未生效：扩展数据序列化失败（{err}）").into());
+                    return;
+                }
+            }
+        };
         self.model.borrow_mut().set_ext(json);
     }
 

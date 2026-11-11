@@ -1053,42 +1053,45 @@ impl SheetEditor {
                     cx,
                 )))
                 .child(body)
-                .child(
-                    div()
-                        .flex_none()
-                        .mx(px(16.))
-                        .py(px(12.))
-                        .border_t_1()
-                        .border_color(t.border)
-                        .flex()
-                        .flex_row()
-                        .gap(px(10.))
-                        .child(
-                            ghost_btn("sp-del", "删除迷你图", t)
-                                .flex_1()
-                                .flex_row()
-                                .gap(px(4.))
-                                .child(icon("trash", 13., t.text_secondary))
-                                .on_click(Self::cmd(format!("del-spark:{},{}", cell.r, cell.c), cx)),
-                        )
-                        .child(ghost_btn("sp-delg", "删除迷你图组", t).flex_1().flex_row().gap(px(4.)).child(icon("trash", 13., t.text_secondary)).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                let g = group.clone();
-                                this.side = None;
-                                this.spark_open = 0;
-                                this.update_sx(
-                                    |x| {
-                                        for c in x.cells.iter_mut() {
-                                            if c.spark.as_ref().is_some_and(|s| (!g.is_empty() && s.group == g) || (c.r == cell.r && c.c == cell.c)) {
-                                                c.spark = None;
-                                            }
-                                        }
-                                    },
-                                    cx,
-                                );
-                            }),
-                        )),
-                ),
+                .child(self.spark_panel_part(cell, t, cx, group.clone())),
         )
+    }
+    /// 从 `spark_panel` 拆出。
+    fn spark_panel_part(&self, cell: Cell, t: &Theme, cx: &mut Context<Self>, group: String) -> AnyElement {
+        div()
+            .flex_none()
+            .mx(px(16.))
+            .py(px(12.))
+            .border_t_1()
+            .border_color(t.border)
+            .flex()
+            .flex_row()
+            .gap(px(10.))
+            .child(
+                ghost_btn("sp-del", "删除迷你图", t)
+                    .flex_1()
+                    .flex_row()
+                    .gap(px(4.))
+                    .child(icon("trash", 13., t.text_secondary))
+                    .on_click(Self::cmd(format!("del-spark:{},{}", cell.r, cell.c), cx)),
+            )
+            .child(ghost_btn("sp-delg", "删除迷你图组", t).flex_1().flex_row().gap(px(4.)).child(icon("trash", 13., t.text_secondary)).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    let g = group.clone();
+                    this.side = None;
+                    this.spark_open = 0;
+                    this.update_sx(
+                        |x| {
+                            for c in x.cells.iter_mut() {
+                                if c.spark.as_ref().is_some_and(|s| (!g.is_empty() && s.group == g) || (c.r == cell.r && c.c == cell.c)) {
+                                    c.spark = None;
+                                }
+                            }
+                        },
+                        cx,
+                    );
+                },
+            )))
+            .into_any_element()
     }
 }

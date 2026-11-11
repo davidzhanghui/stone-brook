@@ -153,6 +153,166 @@ impl Workspace {
 
     // ───────────── 设置 ─────────────
 
+    /// 打开设置（已打开则保持）。
+    pub fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            self.editor.update(cx, |e, cx| e.save_now(cx));
+            self.settings_open = true;
+            self.more_menu = false;
+        }
+        cx.notify();
+    }
+
+    /// 重启并安装已下载的新版本。
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        let crate::updater::State::Ready { app, .. } = crate::updater::state() else { return };
+        self.editor.update(cx, |e, _| e.save_now_queued());
+        crate::flush_all();
+        match crate::updater::schedule_install(&app, true) {
+            Ok(()) => cx.quit(),
+            Err(e) => self.show_toast_for(e.to_string(), 8000, cx),
+        }
+    }
+
+    /// 设置里的「更新」一节。
+    fn render_update(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::updater::State;
+        let btn = |id: &'static str, label: String, primary: bool| {
+            div()
+                .id(id)
+                .px_3()
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { t.accent } else { t.border })
+                .when(primary, |d| d.bg(t.accent).text_color(gpui::white()))
+                .when(!primary, |d| d.text_color(t.text_secondary).hover(|s| s.bg(t.hover).text_color(t.text)))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .flex_shrink_0()
+                .child(label)
+        };
+        let cur = crate::updater::current_version();
+        let st = crate::updater::state();
+        let (status, action): (String, Option<gpui::Stateful<gpui::Div>>) = match &st {
+            State::Idle => (format!("当前版本 {cur}"), Some(btn("upd-check", crate::i18n::tr("检查更新").into(), false))),
+            State::Checking => ("正在检查更新…".into(), None),
+            State::UpToDate => (format!("当前版本 {cur}，已是最新"), Some(btn("upd-check", crate::i18n::tr("重新检查").into(), false))),
+            State::Available(r) => (format!("发现新版本 {}（当前 {cur}）", r.version), Some(btn("upd-dl", crate::i18n::tr("下载更新").into(), true))),
+            State::Downloading(r) => {
+                let (got, total) = crate::updater::progress();
+                let pct = match (got * 100).checked_div(total) {
+                    Some(p) => format!(" {p}%"),
+                    None => format!(" {}", crate::convert::human_size(got)),
+                };
+                (format!("正在下载 {}{pct}", r.version), None)
+            }
+            State::Ready { release, .. } => {
+                (format!("新版本 {} 已下载好", release.version), Some(btn("upd-install", crate::i18n::tr("重启并安装").into(), true)))
+            }
+            State::Failed(e) => (e.clone(), Some(btn("upd-check", crate::i18n::tr("重试").into(), false))),
+        };
+        let action = action.map(|b| {
+            let st = st.clone();
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                match &st {
+                    State::Available(r) => crate::updater::start_download(r.clone()),
+                    State::Ready { .. } => this.install_update(cx),
+                    _ => crate::updater::run(true, true),
+                }
+                cx.notify();
+            }))
+        });
+        let auto = crate::updater::auto_enabled(&self.store);
+        let notes = match &st {
+            State::Available(r) | State::Downloading(r) | State::Ready { release: r, .. } => r.notes.trim().to_string(),
+            _ => String::new(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .py_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(div().text_size(px(14.)).text_color(t.text).child(crate::i18n::tr("应用更新")))
+                            .child(div().text_size(px(12.)).text_color(t.text_muted).child(status)),
+                    )
+                    .children(action),
+            )
+            .when(!notes.is_empty(), |d| {
+                d.child(
+                    div()
+                        .mt_2()
+                        .p_2()
+                        .max_h(px(160.))
+                        .overflow_hidden()
+                        .rounded(px(6.))
+                        .bg(t.hover)
+                        .text_size(px(12.))
+                        .text_color(t.text_secondary)
+                        .child(notes.chars().take(1200).collect::<String>()),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .py_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .gap(px(2.))
+                            .child(div().text_size(px(14.)).text_color(t.text).child(crate::i18n::tr("自动更新")))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(t.text_muted)
+                                    .child(crate::i18n::tr("每天检查一次，有新版本自动下载，退出时自动安装（需允许联网）")),
+                            ),
+                    )
+                    .child(div().flex().flex_row().p(px(3.)).gap(px(2.)).rounded(px(8.)).bg(t.hover).children(
+                        [("upd-auto-on", "开启", true), ("upd-auto-off", "关闭", false)].map(|(id, label, v)| {
+                            let on = auto == v;
+                            div()
+                                .id(id)
+                                .px_3()
+                                .py(px(5.))
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .text_size(px(13.))
+                                .when(on, |d| d.bg(t.panel_bg).shadow_sm().text_color(t.accent))
+                                .when(!on, |d| d.text_color(t.text_secondary).hover(|s| s.text_color(t.text)))
+                                .child(crate::i18n::tr(label))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    crate::updater::set_auto(&this.store, v);
+                                    cx.notify();
+                                }))
+                        }),
+                    )),
+            )
+    }
+
     pub fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |e, cx| e.save_now(cx));
         self.settings_open = !self.settings_open;
@@ -475,7 +635,7 @@ impl Workspace {
                     )
                     .child(div().mt_5().text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("隐私")))
                     .child(
-                        row("允许联网", "仅用于网页卡片抓取标题和封面；关闭后石渠完全离线").child(
+                        row("允许联网", "用于网页卡片抓取标题和封面、检查应用更新；关闭后石渠完全离线").child(
                             group()
                                 .child(seg("net-on", "开启", net).on_click(cx.listener(|this, _, _, cx| {
                                     crate::settings::set_network(&this.store, true);
@@ -487,6 +647,8 @@ impl Workspace {
                                 }))),
                         ),
                     )
+                    .child(div().mt_5().text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("更新")))
+                    .child(self.render_update(t, cx))
                     .child(div().mt_5().text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("写作统计")))
                     .child(div().pt_3().child(self.render_heatmap(t)))
                     .child(div().mt_5().text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("数据")))

@@ -30,7 +30,7 @@ enum WaveState {
 }
 
 thread_local! {
-    static WAVES: RefCell<HashMap<String, WaveState>> = RefCell::new(HashMap::new());
+    static WAVES: RefCell<crate::lru::Lru<String, WaveState>> = RefCell::new(crate::lru::Lru::new(128));
     /// 播放中定时刷新进度（不用逐帧重绘整篇文档）
     static TICKING: Cell<bool> = const { Cell::new(false) };
 }

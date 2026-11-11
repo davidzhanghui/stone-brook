@@ -771,40 +771,54 @@ fn is_workday(ms: i64) -> bool {
     ymd(ms).map(|d| d.weekday().num_days_from_monday() < 5).unwrap_or(true)
 }
 
+/// 在公式函数里定义取参工具：`need(n)` 与 `num1!` / `date1!` / `text1!`（参数不合法时直接从所在函数返回错误）。
+/// 用 `$d` 传入 `$`，在宏里再定义宏。
+#[rustfmt::skip]
+macro_rules! arg_helpers {
+    ($d:tt $args:ident $f:ident $name:ident $need:ident) => {
+        #[allow(unused)]
+        let $need = |n: usize| -> Option<FVal> { ($args.len() < n).then(|| Err(format!("{} 需要 {n} 个参数", $name))) };
+        #[allow(unused_macros)]
+        macro_rules! num1 {
+            ($d i:expr) => {
+                match arg($args, $d i, $f) {
+                    Err(e) => return Err(e),
+                    v => match v.num() {
+                        Some(n) => n,
+                        None => return Err(format!("{} 的参数「{}」不是数字", $name, v.text())),
+                    },
+                }
+            };
+        }
+        #[allow(unused_macros)]
+        macro_rules! date1 {
+            ($d i:expr) => {
+                match arg($args, $d i, $f) {
+                    Err(e) => return Err(e),
+                    v if v.is_null() => return Null,
+                    v => match to_date(&v) {
+                        Some(d) => d,
+                        None => return Err(format!("{} 的参数「{}」不是日期", $name, v.text())),
+                    },
+                }
+            };
+        }
+        #[allow(unused_macros)]
+        macro_rules! text1 {
+            ($d i:expr) => {
+                match arg($args, $d i, $f) {
+                    Err(e) => return Err(e),
+                    v => v.text(),
+                }
+            };
+        }
+    };
+}
+
+/// 内置函数求值：数学与逻辑；没有命中的交给下一组（文本 → 日期 → 列表 / 其他）。
 fn call(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
     use FVal::*;
-    let need = |n: usize| -> Option<FVal> { (args.len() < n).then(|| Err(format!("{name} 需要 {n} 个参数"))) };
-    macro_rules! num1 {
-        ($i:expr) => {
-            match arg(args, $i, f) {
-                Err(e) => return Err(e),
-                v => match v.num() {
-                    Some(n) => n,
-                    None => return Err(format!("{name} 的参数「{}」不是数字", v.text())),
-                },
-            }
-        };
-    }
-    macro_rules! date1 {
-        ($i:expr) => {
-            match arg(args, $i, f) {
-                Err(e) => return Err(e),
-                v if v.is_null() => return Null,
-                v => match to_date(&v) {
-                    Some(d) => d,
-                    None => return Err(format!("{name} 的参数「{}」不是日期", v.text())),
-                },
-            }
-        };
-    }
-    macro_rules! text1 {
-        ($i:expr) => {
-            match arg(args, $i, f) {
-                Err(e) => return Err(e),
-                v => v.text(),
-            }
-        };
-    }
+    arg_helpers!($ args f name need);
     match name {
         "SUM" | "AVERAGE" | "MAX" | "MIN" | "COUNT" => {
             let v = match nums(args, f) {
@@ -899,6 +913,15 @@ fn call(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
             Err(_) => arg(args, 1, f),
             v => v,
         },
+        _ => call_text(name, args, f),
+    }
+}
+
+/// 文本函数。
+fn call_text(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
+    use FVal::*;
+    arg_helpers!($ args f name need);
+    match name {
         "CONCATENATE" => Str(args.iter().map(|a| ev(a, f).text()).collect()),
         "LEN" => Num(text1!(0).chars().count() as f64),
         "LEFT" | "RIGHT" => {
@@ -962,6 +985,15 @@ fn call(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
                 },
             }
         }
+        _ => call_date(name, args, f),
+    }
+}
+
+/// 日期函数。
+fn call_date(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
+    use FVal::*;
+    arg_helpers!($ args f name need);
+    match name {
         "TODAY" => Date(today()),
         "NOW" => Date(crate::store::now_ms()),
         "DATE" => from_ymd(num1!(0) as i32, num1!(1) as i32, num1!(2) as i32).map(Date).unwrap_or(Err("日期无效".into())),
@@ -1065,6 +1097,15 @@ fn call(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
         }
         "CREATED_TIME" => f.env.created(),
         "RECORD_ID" => f.env.record_id(),
+        _ => call_list(name, args, f),
+    }
+}
+
+/// 统计、正则、列表与其他函数。
+fn call_list(name: &str, args: &[Expr], f: &mut Ctx) -> FVal {
+    use FVal::*;
+    arg_helpers!($ args f name need);
+    match name {
         "MEDIAN" => {
             let mut v = match nums(args, f) {
                 Ok(v) => v,

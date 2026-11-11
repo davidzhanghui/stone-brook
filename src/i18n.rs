@@ -27,7 +27,12 @@ pub fn set_english(on: bool) {
 
 /// 静态界面文字：英文模式下返回译文。
 pub fn tr(zh: &'static str) -> &'static str {
-    if !english() {
+    tr_in(english(), zh)
+}
+
+/// 按指定语言查表（不读进程级开关，测试用它，避免与并行测试互相干扰）。
+fn tr_in(english: bool, zh: &'static str) -> &'static str {
+    if !english {
         return zh;
     }
     EN.get(zh).copied().unwrap_or(zh)
@@ -59,10 +64,9 @@ mod tests {
 
     #[test]
     fn falls_back_to_chinese() {
-        set_english(true);
-        assert_eq!(tr("新建文档"), "New document");
-        assert_eq!(tr("一句表里没有的话"), "一句表里没有的话");
-        set_english(false);
-        assert_eq!(tr("新建文档"), "新建文档");
+        // 不改进程级开关：其他并行测试里的 tr() 会读到它
+        assert_eq!(tr_in(true, "新建文档"), "New document");
+        assert_eq!(tr_in(true, "一句表里没有的话"), "一句表里没有的话");
+        assert_eq!(tr_in(false, "新建文档"), "新建文档");
     }
 }

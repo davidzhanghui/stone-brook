@@ -3,7 +3,7 @@
 //! 保存文档时写回，打开文档时用最新版本替换。
 
 use super::*;
-use crate::model::{blocks_from_json, blocks_to_json, Block, BlockKind};
+use crate::model::{blocks_from_json, Block, BlockKind};
 use crate::theme::Theme;
 use crate::ui::icon;
 use std::collections::HashMap;
@@ -32,7 +32,8 @@ fn group_json(blocks: &[Arc<Block>], r: &Range<usize>) -> String {
             b
         })
         .collect();
-    blocks_to_json(&v)
+    // 落盘用：序列化失败返回空串，`Store::save_sync` 会拒绝写入并上报
+    crate::model::try_blocks_to_json(&v).unwrap_or_default()
 }
 
 impl Editor {
@@ -114,7 +115,7 @@ impl Editor {
             b.sync = Some(id.to_string());
         }
         // 光标在空段落上时直接替换它
-        let h = self.head.block;
+        let h = self.core.head.block;
         let replace_empty = h > 0 && matches!(self.content.blocks[h].kind, BlockKind::Text) && self.content.blocks[h].text.is_empty();
         if replace_empty {
             self.checkpoint(EditKind::Other);

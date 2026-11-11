@@ -58,7 +58,7 @@ fi
 
 # ───────────── 编译 ─────────────
 step "编译 release 版本 ${VERSION}${FEATURES[*]:+（不含开发功能）}"
-cargo build --release "${FEATURES[@]}"
+cargo build --release --locked "${FEATURES[@]}"
 
 # ───────────── 组装 .app ─────────────
 step "组装 ${APP}"

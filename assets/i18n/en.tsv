@@ -131,7 +131,7 @@ Rust + GPUI，Metal 直接绘制，百万字不卡顿	Rust + GPUI drawn with Met
 添加评论时显示的名字	Name shown on your comments
 隐私	Privacy
 允许联网	Allow network access
-仅用于网页卡片抓取标题和封面；关闭后石渠完全离线	Only used to fetch titles and covers for link cards; turn off to stay fully offline
+用于网页卡片抓取标题和封面、检查应用更新；关闭后石渠完全离线	Used to fetch titles and covers for link cards and to check for updates; turn off to stay fully offline
 开启	On
 写作统计	Writing stats
 数据	Data
@@ -490,3 +490,13 @@ LaTeX · 支持 KaTeX 全部语法	LaTeX · full KaTeX syntax
 （文档数据损坏）	(Damaged document)
 本地文档	Local docs
 回收站	Trash
+检查更新…	Check for Updates…
+检查更新	Check for updates
+重新检查	Check again
+下载更新	Download update
+重启并安装	Restart and install
+重试	Retry
+应用更新	App updates
+自动更新	Automatic updates
+每天检查一次，有新版本自动下载，退出时自动安装（需允许联网）	Checks once a day, downloads new versions automatically, and installs them when you quit (requires network access)
+更新	Updates

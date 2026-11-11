@@ -320,14 +320,14 @@ impl Editor {
         let (disp, map, images) = if maths.is_empty() {
             (None, None, vec![])
         } else {
-            let (d, m, im) = build_display(rt, &maths, &spec, self.nbsp_w.get() * spec.size, t.dark);
+            let (d, m, im) = build_display(rt, &maths, &spec, self.caches.nbsp_w.get() * spec.size, t.dark);
             (Some(d), Some(Rc::new(m)), im)
         };
         let rt_disp: &RichText = disp.as_ref().unwrap_or(rt);
         let m2d = |o: usize| map.as_ref().map_or(o, |m| m.m2d(o));
         let sel = self.sel_in_slot(slot).map(|r| m2d(r.start)..m2d(r.end));
-        let is_head = self.head.slot() == slot;
-        let marked = if is_head { self.marked.clone().map(|r| m2d(r.start)..m2d(r.end)) } else { None };
+        let is_head = self.core.head.slot() == slot;
+        let marked = if is_head { self.core.marked.clone().map(|r| m2d(r.start)..m2d(r.end)) } else { None };
         let finds: Vec<(Range<usize>, bool)> = self
             .find
             .as_ref()
@@ -358,8 +358,8 @@ impl Editor {
         let layout = styled.layout().clone();
         let frame = self.frame.clone();
         let has_sel = self.has_selection();
-        let caret = is_head.then_some(m2d(self.head.offset.min(rt.len())));
-        let show_caret = focused && is_head && !has_sel && self.cursor_visible && !self.read_only;
+        let caret = is_head.then_some(m2d(self.core.head.offset.min(rt.len())));
+        let show_caret = focused && is_head && !has_sel && self.cursor_visible && !self.sess.read_only;
         let sel_start = has_sel && self.sel().0.slot() == slot;
         let sel_start_offset = m2d(self.sel().0.offset.min(rt.len()));
         let caret_color = t.cursor;
@@ -455,14 +455,14 @@ impl Editor {
             return div().h(px(0.)).into_any_element();
         }
         let t = theme(cx).clone();
-        if ix == 0 && self.focus_root.is_some() {
+        if ix == 0 && self.sess.focus_root.is_some() {
             return self.render_focus_crumbs(&t, cx);
         }
         let focused = self.is_focused(window);
         let number = self.ordered_numbers().get(ix).copied().unwrap_or(1);
         let indent_px = blk.indent as f32 * INDENT_W;
         let (pt, pb) = spacing(&blk.kind);
-        let is_head_block = self.head.block == ix;
+        let is_head_block = self.core.head.block == ix;
         let is_image = matches!(blk.kind, BlockKind::Image { .. });
         let empty_here = focused && is_head_block && !self.has_selection() && blk.text.is_empty();
         let last = self.content.blocks.len() - 1;
@@ -484,67 +484,7 @@ impl Editor {
                 let spec = SlotSpec { size, line_h: row_lh, weight: FontWeight::SEMIBOLD, placeholder: Some(blk.kind.label().into()), ..SlotSpec::body(&t) };
                 self.render_slot(ix, 0, &blk.text, spec, focused, &t).on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)).into_any_element()
             }
-            BlockKind::Bullet | BlockKind::Ordered | BlockKind::Todo { .. } => {
-                let checked = matches!(blk.kind, BlockKind::Todo { checked: true });
-                let marker: AnyElement = match &blk.kind {
-                    BlockKind::Bullet => {
-                        div().text_size(px(if blk.indent % 3 == 0 { 20. } else { 15. })).text_color(t.accent).child(bullet_glyph(blk.indent)).into_any_element()
-                    }
-                    BlockKind::Ordered => div()
-                        .relative()
-                        .child(
-                            div()
-                                .id(("ol-num", blk.id as usize))
-                                // 悬停底色往左右各扩 2px，负外边距抵消，编号位置与原来一致
-                                .px(px(2.))
-                                .ml(px(-2.))
-                                .rounded(px(3.))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(t.hover))
-                                .text_size(px(body_size()))
-                                .text_color(t.accent)
-                                .child(ordered_label(number, blk.indent))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.open_ordered_menu(ix, cx);
-                                    }),
-                                ),
-                        )
-                        .children(self.render_ordered_menu(ix, &t, cx))
-                        .into_any_element(),
-                    _ => div()
-                        .id(("todo", blk.id as usize))
-                        .size(px(16.))
-                        .rounded(px(3.))
-                        .border_1()
-                        .border_color(if checked { t.accent } else { t.border_strong })
-                        .when(checked, |d| d.bg(t.accent))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(t.accent))
-                        .when(checked, |d| d.child(icon("check", 12., gpui::white())))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_todo_at(ix, cx);
-                            }),
-                        )
-                        .into_any_element(),
-                };
-                let spec = SlotSpec { color: if checked { t.text_muted } else { t.text }, strike: checked, ..SlotSpec::body(&t) };
-                div()
-                    .flex()
-                    .flex_row()
-                    .w_full()
-                    .child(div().w(px(INDENT_W)).h(px(body_lh())).flex_none().flex().items_center().justify_start().child(marker))
-                    .child(self.render_slot(ix, 0, &blk.text, spec, focused, &t).flex_1().on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)))
-                    .into_any_element()
-            }
+            BlockKind::Bullet | BlockKind::Ordered | BlockKind::Todo { .. } => self.render_block_bullet(ix, cx, &blk, focused, number, &t),
             BlockKind::Quote => {
                 let spec = SlotSpec { color: t.text_secondary, ..SlotSpec::body(&t) };
                 div()
@@ -562,80 +502,8 @@ impl Editor {
                     )
                     .into_any_element()
             }
-            BlockKind::Notes => {
-                let spec = SlotSpec { color: t.text_secondary, ..SlotSpec::body(&t) };
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .gap(px(2.))
-                    .px(px(14.))
-                    .py(px(8.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(t.border)
-                    .bg(t.code_bg.opacity(0.5))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(11.))
-                            .text_color(t.text_muted)
-                            .child(icon("presentation", 12., t.text_muted))
-                            .child(crate::i18n::tr("演讲者备注 · 演示时不显示")),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .child(self.render_slot(ix, 0, &blk.text, spec, focused, &t))
-                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
-                    )
-                    .into_any_element()
-            }
-            BlockKind::Callout { emoji, color } => {
-                let ci = (*color & 7) as usize;
-                let next_emoji =
-                    CALLOUT_EMOJIS.iter().position(|e| e == emoji).map(|i| CALLOUT_EMOJIS[(i + 1) % CALLOUT_EMOJIS.len()]).unwrap_or(CALLOUT_EMOJIS[0]);
-                div()
-                    .flex()
-                    .flex_row()
-                    .w_full()
-                    .gap(px(10.))
-                    .px(px(16.))
-                    .py(px(12.))
-                    .rounded(px(8.))
-                    .bg(t.callout_bg[ci])
-                    .border_1()
-                    .border_color(t.callout_border[ci])
-                    .child(
-                        div()
-                            .id(("emoji", blk.id as usize))
-                            .flex_none()
-                            .h(px(body_lh()))
-                            .text_size(px(17.))
-                            .cursor_pointer()
-                            .rounded(px(4.))
-                            .hover(|s| s.bg(t.hover))
-                            .child(emoji.clone())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.set_callout(ix, Some(next_emoji), None, cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .child(self.render_slot(ix, 0, &blk.text, SlotSpec::body(&t), focused, &t))
-                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
-                    )
-                    .into_any_element()
-            }
+            BlockKind::Notes => self.render_block_notes(ix, cx, &blk, focused, &t),
+            BlockKind::Callout { emoji, color } => self.render_block_callout(ix, cx, &blk, color, emoji, focused, &t),
             BlockKind::Code { lang } => self.render_code(ix, &blk, lang, focused, &t, cx),
             BlockKind::Divider => {
                 let selected = self.block_selected(ix) && focused;
@@ -690,12 +558,12 @@ impl Editor {
                     .items_center()
                     .justify_center()
                     .cursor_grab()
-                    .when(!menu_open, |d| d.invisible().when(!self.read_only, |d| d.group_hover("blk", |s| s.visible())))
+                    .when(!menu_open, |d| d.invisible().when(!self.sess.read_only, |d| d.group_hover("blk", |s| s.visible())))
                     .when(menu_open, |d| d.bg(t.hover))
                     .hover(|s| s.bg(t.hover))
                     .child(icon("grip", 14., t.text_muted))
                     // 阅读模式：不能打开块菜单、不能拖动
-                    .when(!self.read_only, |d| {
+                    .when(!self.sess.read_only, |d| {
                         d.on_click(cx.listener(move |this, _, _, cx| {
                             this.pop.block_menu = if this.pop.block_menu == Some(ix) { None } else { Some(ix) };
                             cx.notify();
@@ -712,7 +580,7 @@ impl Editor {
 
         let n_hidden = if blk.collapsed { crate::editor::fold::subtree(&self.content.blocks, ix).len() } else { 0 };
         // 折叠三角：有子项的块悬停显示，收起时常显
-        let fold = (ix > 0 && !self.read_only && self.has_children(ix)).then(|| {
+        let fold = (ix > 0 && !self.sess.read_only && self.has_children(ix)).then(|| {
             let collapsed = blk.collapsed;
             div().absolute().left(px(GUTTER + indent_px - 50. - if is_table { 16. } else { 0. })).top(px(handle_top.max(0.))).child(
                 div()
@@ -749,7 +617,7 @@ impl Editor {
         // 评论：右侧边距的气泡，打开该块评论时整块淡黄高亮
         let n_open = self.open_comments_on(ix);
         let n_cm = if n_open > 0 { n_open } else { self.comments_on(ix) };
-        let cm_active = self.comment_open == Some(ix) || self.comment_input.as_ref().is_some_and(|c| c.block == ix);
+        let cm_active = self.sess.comment_open == Some(ix) || self.sess.comment_input.as_ref().is_some_and(|c| c.block == ix);
         let cm_badge = (n_cm > 0).then(|| {
             let color = if n_open > 0 { t.accent } else { t.text_muted };
             div()
@@ -911,6 +779,142 @@ impl Editor {
             row.into_any_element()
         }
     }
+    /// 从 `render_block` 拆出。
+    fn render_block_notes(&self, ix: usize, cx: &mut Context<Self>, blk: &std::sync::Arc<Block>, focused: bool, t: &Theme) -> AnyElement {
+        let spec = SlotSpec { color: t.text_secondary, ..SlotSpec::body(t) };
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(px(2.))
+            .px(px(14.))
+            .py(px(8.))
+            .rounded(px(8.))
+            .border_1()
+            .border_dashed()
+            .border_color(t.border)
+            .bg(t.code_bg.opacity(0.5))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.))
+                    .text_color(t.text_muted)
+                    .child(icon("presentation", 12., t.text_muted))
+                    .child(crate::i18n::tr("演讲者备注 · 演示时不显示")),
+            )
+            .child(div().w_full().child(self.render_slot(ix, 0, &blk.text, spec, focused, t)).on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)))
+            .into_any_element()
+    }
+
+    /// 从 `render_block` 拆出。
+    fn render_block_bullet(&self, ix: usize, cx: &mut Context<Self>, blk: &std::sync::Arc<Block>, focused: bool, number: usize, t: &Theme) -> AnyElement {
+        let checked = matches!(blk.kind, BlockKind::Todo { checked: true });
+        let marker: AnyElement = match &blk.kind {
+            BlockKind::Bullet => div()
+                .text_size(px(if blk.indent.is_multiple_of(3) { 20. } else { 15. }))
+                .text_color(t.accent)
+                .child(bullet_glyph(blk.indent))
+                .into_any_element(),
+            BlockKind::Ordered => div()
+                .relative()
+                .child(
+                    div()
+                        .id(("ol-num", blk.id as usize))
+                        // 悬停底色往左右各扩 2px，负外边距抵消，编号位置与原来一致
+                        .px(px(2.))
+                        .ml(px(-2.))
+                        .rounded(px(3.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover))
+                        .text_size(px(body_size()))
+                        .text_color(t.accent)
+                        .child(ordered_label(number, blk.indent))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_ordered_menu(ix, cx);
+                            }),
+                        ),
+                )
+                .children(self.render_ordered_menu(ix, t, cx))
+                .into_any_element(),
+            _ => div()
+                .id(("todo", blk.id as usize))
+                .size(px(16.))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(if checked { t.accent } else { t.border_strong })
+                .when(checked, |d| d.bg(t.accent))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.border_color(t.accent))
+                .when(checked, |d| d.child(icon("check", 12., gpui::white())))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_todo_at(ix, cx);
+                    }),
+                )
+                .into_any_element(),
+        };
+        let spec = SlotSpec { color: if checked { t.text_muted } else { t.text }, strike: checked, ..SlotSpec::body(t) };
+        div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .child(div().w(px(INDENT_W)).h(px(body_lh())).flex_none().flex().items_center().justify_start().child(marker))
+            .child(self.render_slot(ix, 0, &blk.text, spec, focused, t).flex_1().on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)))
+            .into_any_element()
+    }
+
+    /// 从 `render_block` 拆出。
+    fn render_block_callout(&self, ix: usize, cx: &mut Context<Self>, blk: &Arc<Block>, color: &u8, emoji: &String, focused: bool, t: &Theme) -> AnyElement {
+        let ci = (*color & 7) as usize;
+        let next_emoji = CALLOUT_EMOJIS.iter().position(|e| e == emoji).map(|i| CALLOUT_EMOJIS[(i + 1) % CALLOUT_EMOJIS.len()]).unwrap_or(CALLOUT_EMOJIS[0]);
+        div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .gap(px(10.))
+            .px(px(16.))
+            .py(px(12.))
+            .rounded(px(8.))
+            .bg(t.callout_bg[ci])
+            .border_1()
+            .border_color(t.callout_border[ci])
+            .child(
+                div()
+                    .id(("emoji", blk.id as usize))
+                    .flex_none()
+                    .h(px(body_lh()))
+                    .text_size(px(17.))
+                    .cursor_pointer()
+                    .rounded(px(4.))
+                    .hover(|s| s.bg(t.hover))
+                    .child(emoji.clone())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_callout(ix, Some(next_emoji), None, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(self.render_slot(ix, 0, &blk.text, SlotSpec::body(t), focused, t))
+                    .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
+            )
+            .into_any_element()
+    }
 
     fn render_code(&self, ix: usize, blk: &crate::model::Block, lang: &str, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let spec = SlotSpec { size: 13.5, line_h: 22., mono: true, lang: Some(lang.to_string()), ..SlotSpec::body(t) };
@@ -1032,7 +1036,7 @@ impl Editor {
     /// 裁剪是独立模式：显示完整原图 + 遮罩 + 可拖动的裁剪框。
     fn render_image(&self, ix: usize, path: &str, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let blk = &self.content.blocks[ix];
-        let cropping = self.image_crop.as_ref().filter(|c| c.block == ix);
+        let cropping = self.sess.image_crop.as_ref().filter(|c| c.block == ix);
         let selected = (focused && self.block_selected(ix)) || cropping.is_some();
         let max_w = self.image_max_w(ix);
         let crop = match &blk.kind {
@@ -1040,7 +1044,7 @@ impl Editor {
             _ => None,
         };
         // 拖动缩放时用预览宽度
-        let drag = self.image_drag.as_ref().filter(|d| d.block == ix);
+        let drag = self.sess.image_drag.as_ref().filter(|d| d.block == ix);
         let natural = self.image_natural(ix);
         let (dw, dh) = match natural {
             Some((nw, nh)) => {
@@ -1135,7 +1139,7 @@ impl Editor {
                             cx.stop_propagation();
                             window.focus(&this.focus);
                             let (w, _) = this.image_display_box(ix).unwrap_or((240., 240.));
-                            this.image_drag = Some(super::ImageDrag { block: ix, start_w: w, start_px: ev.position, width: w, dir });
+                            this.sess.image_drag = Some(super::ImageDrag { block: ix, start_w: w, start_px: ev.position, width: w, dir });
                             cx.notify();
                         }),
                     )
@@ -1200,7 +1204,7 @@ impl Editor {
                             .children(handles.into_iter().flatten())
                             .children(size_tag)
                             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                                if ev.click_count() == 2 && this.image_crop.is_none() {
+                                if ev.click_count() == 2 && this.sess.image_crop.is_none() {
                                     this.open_image_preview(ix, cx);
                                 }
                             })),
@@ -1215,7 +1219,7 @@ impl Editor {
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus);
-                    if this.image_crop.as_ref().is_some_and(|c| c.block == ix) {
+                    if this.sess.image_crop.as_ref().is_some_and(|c| c.block == ix) {
                         return;
                     }
                     this.mouse_select(Pos::new(ix, 0, 0), 1, ev.modifiers.shift, cx);
@@ -1559,7 +1563,7 @@ impl Editor {
                     .child(format!("P95 {p95:.2}ms"))
                     .child(format!("最大 {max:.1}ms")),
             )
-            .child(format!("{} 块 · {} 字 · 采样 {}", fmt_num(blocks), fmt_num(chars), self.frame_times.len()))
+            .child(format!("{} 块 · {} 字 · 采样 {}", fmt_num(blocks), fmt_num(chars), self.caches.frame_times.len()))
     }
 
     fn render_link_edit(&self, at: Point<Pixels>, t: &Theme) -> Option<impl IntoElement> {
@@ -1607,30 +1611,30 @@ pub fn fmt_num(n: usize) -> String {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let start = Instant::now();
-        self.render_start = Some(start);
+        self.caches.render_start = Some(start);
         self.poll_url_paste(cx);
         // 不换行空格的宽度只和字体有关，量一次就够
-        if !self.nbsp_measured {
-            self.nbsp_measured = true;
+        if !self.caches.nbsp_measured {
+            self.caches.nbsp_measured = true;
             let sz = 15.;
             let run =
                 TextRun { len: "\u{00A0}".len() * 10, font: font(FONT), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
             let w = f32::from(window.text_system().shape_line("\u{00A0}".repeat(10).into(), px(sz), &[run], None).width);
             if w > 0. {
-                self.nbsp_w.set(w / 10. / sz);
+                self.caches.nbsp_w.set(w / 10. / sz);
             }
         }
         crate::math::pump(cx);
-        if self.read_only {
+        if self.sess.read_only {
             // 兜底：阅读模式下被回滚的操作可能把光标留在已撤回的位置
-            self.anchor = self.clamp(self.anchor);
-            self.head = self.clamp(self.head);
+            self.core.anchor = self.clamp(self.core.anchor);
+            self.core.head = self.clamp(self.core.head);
         }
         let t = theme(cx).clone();
         let focused = self.is_focused(window);
         // 光标只在聚焦且窗口在前台时闪烁（否则不再定时重绘）；截图回归时用 STONEBROOK_NOBLINK 让光标常亮
         self.blink_on = focused && window.is_window_active() && !no_blink();
-        let cm_block = self.comment_open.or(self.comment_input.as_ref().map(|c| c.block));
+        let cm_block = self.sess.comment_open.or(self.sess.comment_input.as_ref().map(|c| c.block));
         let (prev_cursor, prev_sel, cm_anchor) = {
             let mut f = self.frame.borrow_mut();
             let cm_anchor = cm_block.and_then(|b| f.blocks.get(&b).copied());
@@ -1652,7 +1656,7 @@ impl Render for Editor {
         let focus = self.focus.clone();
         let frame = self.frame.clone();
         let overlay_follow =
-            self.pop.slash.is_some() || self.pop.mention.is_some() || (self.has_selection() && !self.selecting) || self.pop.link_edit.is_some();
+            self.pop.slash.is_some() || self.pop.mention.is_some() || (self.has_selection() && !self.core.selecting) || self.pop.link_edit.is_some();
         // HTML 交互模式：本帧绘制后把原生 WebView 叠加到预览区域
         let menus_open = self.pop.slash.is_some()
             || self.pop.block_menu.is_some()
@@ -1666,11 +1670,12 @@ impl Render for Editor {
         let dark = t.dark;
         // 全屏文件预览优先：内容区叠加原生 WebView
         let full_live = self
+            .sess
             .file_full
             .and_then(|id| self.content.blocks.iter().find(|b| b.id == id))
             .and_then(|b| super::attach::live_src(&b.kind, dark).map(|s| (b.id, s)));
         let live_html: Option<(u64, crate::webview::LiveSrc)> = full_live.or_else(|| {
-            self.html_live.and_then(|id| {
+            self.sess.html_live.and_then(|id| {
                 self.content.blocks.iter().find(|b| b.id == id).and_then(|b| match &b.kind {
                     BlockKind::Html { file, network, .. } if !file.is_empty() => {
                         Some((id, crate::webview::LiveSrc::File { path: file.into(), network: *network }))
@@ -1683,11 +1688,11 @@ impl Render for Editor {
                 })
             })
         });
-        if self.file_full.is_some() && !self.content.blocks.iter().any(|b| Some(b.id) == self.file_full) {
-            self.file_full = None;
+        if self.sess.file_full.is_some() && !self.content.blocks.iter().any(|b| Some(b.id) == self.sess.file_full) {
+            self.sess.file_full = None;
         }
-        if self.html_live.is_some() && live_html.is_none() {
-            self.html_live = None;
+        if self.sess.html_live.is_some() && live_html.is_none() {
+            self.sess.html_live = None;
             crate::webview::hide_live();
         }
 
@@ -1729,7 +1734,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::focus_block))
             // 阅读模式：只保留移动、选择、复制、查找；会改文档的动作不注册，按键直接落空
-            .when(!self.read_only, |d| {
+            .when(!self.sess.read_only, |d| {
                 d.on_action(cx.listener(Self::backspace))
                     .on_action(cx.listener(Self::delete))
                     .on_action(cx.listener(Self::delete_word_back))
@@ -1773,13 +1778,13 @@ impl Render for Editor {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                     // 点击交互中的 HTML 以外的区域：退出交互，把键盘焦点还给编辑器
-                    if this.file_full.is_some() {
+                    if this.sess.file_full.is_some() {
                         return;
                     }
-                    let Some(id) = this.html_live else { return };
+                    let Some(id) = this.sess.html_live else { return };
                     let inside = this.frame.borrow().html_bounds.get(&id).map(|b| b.contains(&ev.position));
                     if inside == Some(false) {
-                        this.html_live = None;
+                        this.sess.html_live = None;
                         crate::webview::hide_live();
                         cx.notify();
                     }
@@ -1812,10 +1817,10 @@ impl Render for Editor {
                         drop(f);
                         let ms = start.elapsed().as_secs_f32() * 1000.;
                         let again = entity.update(cx, |e, _| {
-                            if e.frame_times.len() >= 240 {
-                                e.frame_times.pop_front();
+                            if e.caches.frame_times.len() >= 240 {
+                                e.caches.frame_times.pop_front();
                             }
-                            e.frame_times.push_back(ms);
+                            e.caches.frame_times.push_back(ms);
                             e.finish_reveal()
                         });
                         redraw |= again;
@@ -1837,7 +1842,7 @@ impl Render for Editor {
             self.slash_at = at;
             root = root.child(self.render_slash(at, c, &t, cx));
         }
-        if self.has_selection() && !self.selecting && focused && self.pop.link_edit.is_none() && !self.read_only {
+        if self.has_selection() && !self.core.selecting && focused && self.pop.link_edit.is_none() && !self.sess.read_only {
             if let Some(p) = prev_sel {
                 if !self.selected_slots().is_empty() {
                     root = root.child(self.render_toolbar(point(p.x - px(8.), p.y - px(46.)), &t, cx));

@@ -2,16 +2,24 @@
 //! 文档内容以 JSON 存一列，另存一份纯文本用于全文搜索。
 //!
 //! 写入模型：所有写操作都进同一个后台写线程的有序队列（单写者，顺序与提交顺序一致）。
-//! 带 key 的任务（文档 / 嵌入对象保存）在队列里按 key 合并，只写最新快照；
-//! 界面线程用另一条只读连接读数据（WAL 下读写互不阻塞）。
+//! 带 key 的任务（文档 / 嵌入对象保存）在队列里按 key 合并：撤掉排队中的旧快照，新快照追加到队尾，
+//! 因此合并后的任务总是在它之前提交的所有任务之后执行。
+//! 界面线程用另一条连接读数据（`PRAGMA query_only`，WAL 下读写互不阻塞），写操作在这条连接上会直接报错。
 //! 需要「写完立刻读到」的地方用 `write_sync`，退出前用 `flush` 等队列写完。
+//!
+//! 故障隔离：写任务 panic 会被捕获并记为写入错误，写线程继续工作；`flush` 有超时，不会让界面线程无限等待。
 
 use crate::model::DocContent;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// `flush` 最长等待时间：超过就放弃等待并报错，避免写线程卡住时界面线程跟着卡死。
+pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 用户可见的品牌名。
 pub const APP_NAME: &str = "石渠";
@@ -79,6 +87,42 @@ struct Queue {
 struct Writer {
     q: Mutex<Queue>,
     cv: Condvar,
+    /// 写线程已退出（正常情况下不会发生；置位后 `write` 直接报错、`flush` 不再等待）
+    dead: AtomicBool,
+}
+
+impl Writer {
+    fn new() -> Self {
+        Writer { q: Mutex::new(Queue::default()), cv: Condvar::new(), dead: AtomicBool::new(false) }
+    }
+}
+
+/// 写线程退出时（无论什么原因）置 `dead` 并唤醒所有等待者。
+struct DeadOnDrop<'a>(&'a Writer);
+
+impl Drop for DeadOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.dead.store(true, Ordering::SeqCst);
+        if let Ok(mut q) = self.0.q.lock() {
+            q.busy = false;
+        }
+        self.0.cv.notify_all();
+    }
+}
+
+/// 把编码失败转成写任务错误（不写入任何数据）。
+pub fn encode_error(what: &str, e: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(format!("{what}序列化失败：{e}").into())
+}
+
+fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "未知错误".to_string()
+    }
 }
 
 #[derive(Clone)]
@@ -162,6 +206,15 @@ const MIGRATIONS: &[&str] = &[
     // 2：全文索引（trigram 分词，中英文都能做子串匹配；少于 3 个字的查询回退到扫描）
     "CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(id UNINDEXED, title, plain, tokenize = 'trigram');
      INSERT INTO docs_fts (id, title, plain) SELECT id, title, plain FROM docs;",
+    // 3：全文索引改为按整数 rowid 关联（`docs.fts` ↔ `docs_fts.rowid`）。
+    //    原来按 UNINDEXED 的 id 列删除，FTS5 只能逐行扫描整个索引；按 rowid 删改是 O(log n)。
+    //    不直接用 docs 的隐含 rowid：没有 INTEGER PRIMARY KEY 的表在 VACUUM 时 rowid 可能被重排。
+    "ALTER TABLE docs ADD COLUMN fts INTEGER;
+     UPDATE docs SET fts = rowid;
+     CREATE UNIQUE INDEX IF NOT EXISTS docs_fts_rowid ON docs(fts);
+     DROP TABLE IF EXISTS docs_fts;
+     CREATE VIRTUAL TABLE docs_fts USING fts5(title, plain, tokenize = 'trigram');
+     INSERT INTO docs_fts (rowid, title, plain) SELECT fts, title, plain FROM docs;",
 ];
 
 /// 当前代码支持的库 schema 版本（备份恢复时用来拒绝来自更新版本的备份）。
@@ -169,8 +222,23 @@ pub fn schema_version() -> usize {
     MIGRATIONS.len()
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// 升级库结构。库版本比代码新时拒绝打开（旧代码读写新库可能损坏数据）；
+/// 对已有数据执行迁移前，先把整个库复制到 `recovery/pre-migrate-v<N>-<时间>.db`，复制失败就不迁移。
+fn migrate(conn: &mut Connection, data_dir: Option<&Path>) -> Result<()> {
     let ver: usize = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? as usize;
+    if ver > MIGRATIONS.len() {
+        anyhow::bail!("数据库来自更新版本的石渠（库版本 {ver}，当前应用支持到 {}），请先升级应用", MIGRATIONS.len());
+    }
+    if ver == MIGRATIONS.len() {
+        return Ok(());
+    }
+    let has_data: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'docs')", [], |r| r.get(0))?;
+    if let (true, Some(dir)) = (has_data, data_dir) {
+        let rec = dir.join("recovery");
+        std::fs::create_dir_all(&rec)?;
+        let dst = rec.join(format!("pre-migrate-v{ver}-{}.db", now_ms()));
+        conn.execute("VACUUM INTO ?1", [dst.to_string_lossy().as_ref()]).map_err(|e| anyhow::anyhow!("迁移前备份数据库失败（{e}），已取消升级"))?;
+    }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(ver) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
@@ -180,14 +248,22 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn open_conn(path: &std::path::Path) -> Result<Connection> {
+fn open_conn(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")?;
     Ok(conn)
 }
 
+/// 界面线程用的读连接：`query_only` 让任何误写当场报错，「单写者」由机制而非约定保证。
+fn open_read_conn(path: &Path) -> Result<Connection> {
+    let conn = open_conn(path)?;
+    conn.execute_batch("PRAGMA query_only=ON;")?;
+    Ok(conn)
+}
+
 impl Writer {
     fn run(&self, mut conn: Connection, error: Arc<Mutex<Option<String>>>) {
+        let _guard = DeadOnDrop(self);
         loop {
             let job = {
                 let mut q = self.q.lock().unwrap_or_else(|e| e.into_inner());
@@ -198,9 +274,16 @@ impl Writer {
                 q.jobs.pop_front().map(|(_, j)| j)
             };
             if let Some(job) = job {
-                if let Err(e) = job(&mut conn) {
-                    eprintln!("写库失败：{e}");
-                    *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                // 单个任务 panic（序列化闭包里的 bug 等）不能带走写线程，否则之后的保存全部静默失效
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut conn)));
+                let msg = match res {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(format!("保存失败：{e}")),
+                    Err(p) => Some(format!("保存失败（内部错误）：{}", panic_message(&*p))),
+                };
+                if let Some(msg) = msg {
+                    eprintln!("{msg}");
+                    *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
                 }
             }
             self.q.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
@@ -215,15 +298,41 @@ impl Store {
         std::fs::create_dir_all(data_dir.join("assets"))?;
         let path = data_dir.join(DB_FILE);
         let mut wconn = open_conn(&path)?;
-        migrate(&mut wconn)?;
-        let conn = open_conn(&path)?;
-        let writer = Arc::new(Writer { q: Mutex::new(Queue::default()), cv: Condvar::new() });
+        migrate(&mut wconn, Some(&data_dir))?;
+        let conn = open_read_conn(&path)?;
+        Self::start(wconn, conn, data_dir)
+    }
+
+    /// 在指定目录打开（测试用，不碰进程级环境变量）。
+    #[cfg(test)]
+    pub fn open_in(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir.join("assets"))?;
+        let mut w = open_conn(&dir.join(DB_FILE))?;
+        migrate(&mut w, Some(dir))?;
+        let conn = open_read_conn(&dir.join(DB_FILE))?;
+        Self::start(w, conn, dir.to_path_buf())
+    }
+
+    fn start(wconn: Connection, conn: Connection, data_dir: PathBuf) -> Result<Self> {
+        let writer = Arc::new(Writer::new());
         let error = Arc::new(Mutex::new(None));
         {
             let (w, e) = (writer.clone(), error.clone());
             std::thread::Builder::new().name("stonebrook-writer".into()).spawn(move || w.run(wconn, e))?;
         }
         Ok(Store { conn: Arc::new(Mutex::new(conn)), writer, error, data_dir })
+    }
+
+    /// 生成整库一致快照（备份导出用）。用独立连接执行，不占用界面线程的读连接。
+    pub fn snapshot_to(&self, dst: &Path) -> Result<()> {
+        let c = open_conn(&self.data_dir.join(DB_FILE))?;
+        c.execute("VACUUM INTO ?1", [dst.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
+    /// 打开一条独立的只读连接（后台线程做大查询用，不和界面线程抢同一把锁）。
+    pub fn open_reader(&self) -> Result<Connection> {
+        open_read_conn(&self.data_dir.join(DB_FILE))
     }
 
     pub fn assets_dir(&self) -> PathBuf {
@@ -238,17 +347,20 @@ impl Store {
         f(&mut conn)
     }
 
-    /// 提交一个写任务（后台按顺序执行）。带 `key` 的任务若队列里已有同 key 的未执行任务，就地替换（只写最新的）。
+    /// 提交一个写任务（后台按顺序执行）。
+    /// 带 `key` 的任务若队列里已有同 key 的未执行任务，撤掉旧的、新的追加到队尾（只写最新的，且不越过之前提交的任务）。
     pub fn write(&self, key: Option<String>, job: impl FnOnce(&mut Connection) -> rusqlite::Result<()> + Send + 'static) {
+        if self.writer.dead.load(Ordering::SeqCst) {
+            self.report_error("保存失败：写入线程已停止，请重启应用（未保存的修改仍在内存中）");
+            return;
+        }
         let mut q = self.writer.q.lock().unwrap_or_else(|e| e.into_inner());
-        let job: Job = Box::new(job);
         if let Some(k) = &key {
-            if let Some(slot) = q.jobs.iter_mut().find(|(x, _)| x.as_ref() == Some(k)) {
-                slot.1 = job;
-                return;
+            if let Some(i) = q.jobs.iter().position(|(x, _)| x.as_ref() == Some(k)) {
+                q.jobs.remove(i);
             }
         }
-        q.jobs.push_back((key, job));
+        q.jobs.push_back((key, Box::new(job)));
         drop(q);
         self.writer.cv.notify_all();
     }
@@ -259,38 +371,84 @@ impl Store {
         self.flush();
     }
 
-    /// 等待写队列清空（退出前、需要读到刚写入的数据前调用）。
-    pub fn flush(&self) {
-        let mut q = self.writer.q.lock().unwrap_or_else(|e| e.into_inner());
-        while !q.jobs.is_empty() || q.busy {
-            q = self.writer.cv.wait(q).unwrap_or_else(|e| e.into_inner());
-        }
+    /// 等待写队列清空（退出前、需要读到刚写入的数据前调用）。返回是否在 `FLUSH_TIMEOUT` 内写完。
+    pub fn flush(&self) -> bool {
+        self.flush_timeout(FLUSH_TIMEOUT)
     }
 
-    /// 取走最近一次写库失败的原因。
+    pub fn flush_timeout(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut q = self.writer.q.lock().unwrap_or_else(|e| e.into_inner());
+        while !q.jobs.is_empty() || q.busy {
+            if self.writer.dead.load(Ordering::SeqCst) {
+                drop(q);
+                self.report_error("保存失败：写入线程已停止，请重启应用");
+                return false;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                drop(q);
+                self.report_error("保存仍在进行中，等待超时（数据可能尚未写入磁盘）");
+                return false;
+            }
+            q = self.writer.cv.wait_timeout(q, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
+
+    /// 取走最近一次存储错误（写入失败、读取失败、对象损坏等，界面层轮询后提示一次）。
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
-    /// 查询多行（出错时返回空并打印原因）。
+    /// 记录一个需要让用户看到的存储错误。
+    pub fn report_error(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        eprintln!("{msg}");
+        *self.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
+    }
+
+    /// 查询多行。出错时返回空并进错误通道（否则「查询失败」和「没有数据」无法区分，用户会以为数据没了）。
     fn rows<T>(&self, sql: &str, p: impl Params, f: impl FnMut(&Row<'_>) -> rusqlite::Result<T>) -> Vec<T> {
-        self.with_conn(|c| {
-            let res = c.prepare_cached(sql).and_then(|mut st| st.query_map(p, f).map(|it| it.filter_map(|r| r.ok()).collect()));
-            res.unwrap_or_else(|e| {
-                eprintln!("查询失败：{e}");
-                vec![]
+        let res = self.with_conn(|c| {
+            c.prepare_cached(sql).and_then(|mut st| {
+                st.query_map(p, f).map(|it| {
+                    // 单行读不出来时跳过这一行（其余照常显示），但要让用户知道
+                    let (mut ok, mut bad) = (vec![], None);
+                    for r in it {
+                        match r {
+                            Ok(v) => ok.push(v),
+                            Err(e) => bad = Some(e),
+                        }
+                    }
+                    (ok, bad)
+                })
             })
+        });
+        match res {
+            Ok((v, None)) => v,
+            Ok((v, Some(e))) => {
+                self.report_error(format!("部分数据读取失败：{e}"));
+                v
+            }
+            Err(e) => {
+                self.report_error(format!("读取数据失败：{e}"));
+                vec![]
+            }
+        }
+    }
+
+    /// 查询一行（出错时返回 None 并进错误通道）。
+    fn row<T>(&self, sql: &str, p: impl Params, f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>) -> Option<T> {
+        self.try_row(sql, p, f).unwrap_or_else(|e| {
+            self.report_error(format!("读取数据失败：{e}"));
+            None
         })
     }
 
-    /// 查询一行。
-    fn row<T>(&self, sql: &str, p: impl Params, f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>) -> Option<T> {
-        self.with_conn(|c| {
-            c.query_row(sql, p, f).optional().unwrap_or_else(|e| {
-                eprintln!("查询失败：{e}");
-                None
-            })
-        })
+    /// 查询一行，区分「没有这行」(`Ok(None)`) 与「读取失败」(`Err`)。
+    fn try_row<T>(&self, sql: &str, p: impl Params, f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>) -> rusqlite::Result<Option<T>> {
+        self.with_conn(|c| c.query_row(sql, p, f).optional())
     }
 
     // ───────────── 文档 ─────────────
@@ -394,30 +552,49 @@ impl Store {
     pub fn create(&self, parent: Option<&str>, content: &DocContent) -> String {
         let id = new_uuid();
         let now = now_ms();
-        let (pid, title, json, plain) = (parent.map(str::to_string), content.title(), content.to_json(), content.plain_text());
+        let (pid, title, plain) = (parent.map(str::to_string), content.title(), content.plain_text());
+        let json = content.try_to_json();
         let doc = id.clone();
         self.write_sync(move |c| {
+            let json = json.map_err(|e| encode_error("文档", e))?;
             let tx = c.transaction()?;
-            let sort: f64 = tx.query_row("SELECT COALESCE(MAX(sort), 0) + 1 FROM docs", [], |r| r.get(0))?;
+            let (sort, fts): (f64, i64) =
+                tx.query_row("SELECT COALESCE(MAX(sort), 0) + 1, COALESCE(MAX(fts), 0) + 1 FROM docs", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
             tx.execute(
-                "INSERT INTO docs (id, parent, title, sort, created, updated, content, plain) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
-                params![doc, pid, title, sort, now, json, plain],
+                "INSERT INTO docs (id, parent, title, sort, created, updated, content, plain, fts) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)",
+                params![doc, pid, title, sort, now, json, plain, fts],
             )?;
-            tx.execute("INSERT INTO docs_fts (id, title, plain) VALUES (?1, ?2, ?3)", params![doc, title, plain])?;
+            tx.execute("INSERT INTO docs_fts (rowid, title, plain) VALUES (?1, ?2, ?3)", params![fts, title, plain])?;
             tx.commit()
         });
         id
     }
 
-    /// 保存文档：放进写队列，同一文档未写的旧快照会被替换。序列化在写线程里做。
+    /// 保存文档：放进写队列，同一文档未写的旧快照会被替换。序列化在写线程里做；序列化失败时不写入（不会用空内容覆盖）。
     pub fn save(&self, id: &str, content: &DocContent) {
         let (doc, content) = (id.to_string(), content.clone());
         self.write(Some(format!("doc:{id}")), move |c| {
-            let (title, json, plain) = (content.title(), content.to_json(), content.plain_text());
+            let json = content.try_to_json().map_err(|e| encode_error("文档", e))?;
+            let (title, plain) = (content.title(), content.plain_text());
             let tx = c.transaction()?;
-            tx.execute("UPDATE docs SET title = ?2, content = ?3, plain = ?4, updated = ?5 WHERE id = ?1", params![doc, title, json, plain, now_ms()])?;
-            tx.execute("DELETE FROM docs_fts WHERE id = ?1", [&doc])?;
-            tx.execute("INSERT INTO docs_fts (id, title, plain) VALUES (?1, ?2, ?3)", params![doc, title, plain])?;
+            let n =
+                tx.execute("UPDATE docs SET title = ?2, content = ?3, plain = ?4, updated = ?5 WHERE id = ?1", params![doc, title, json, plain, now_ms()])?;
+            if n == 0 {
+                return tx.commit(); // 文档已被永久删除
+            }
+            let fts: Option<i64> = tx.query_row("SELECT fts FROM docs WHERE id = ?1", [&doc], |r| r.get(0)).optional()?.flatten();
+            let fts = match fts {
+                Some(n) => {
+                    tx.execute("DELETE FROM docs_fts WHERE rowid = ?1", [n])?;
+                    n
+                }
+                None => {
+                    let n: i64 = tx.query_row("SELECT COALESCE(MAX(fts), 0) + 1 FROM docs", [], |r| r.get(0))?;
+                    tx.execute("UPDATE docs SET fts = ?2 WHERE id = ?1", params![doc, n])?;
+                    n
+                }
+            };
+            tx.execute("INSERT INTO docs_fts (rowid, title, plain) VALUES (?1, ?2, ?3)", params![fts, title, plain])?;
             tx.commit()
         });
     }
@@ -443,7 +620,7 @@ impl Store {
             let tx = c.transaction()?;
             // 先删评论和索引（依赖 docs 里的父子关系），最后删文档本身
             tx.execute(&format!("{SUB} DELETE FROM comments WHERE doc IN sub"), [&id])?;
-            tx.execute(&format!("{SUB} DELETE FROM docs_fts WHERE id IN sub"), [&id])?;
+            tx.execute(&format!("{SUB} DELETE FROM docs_fts WHERE rowid IN (SELECT fts FROM docs WHERE id IN sub AND fts IS NOT NULL)"), [&id])?;
             tx.execute(&format!("{SUB} DELETE FROM docs WHERE id IN sub"), [&id])?;
             tx.commit()
         });
@@ -464,7 +641,7 @@ impl Store {
             // 整体作为一个短语，转义双引号
             let phrase = format!("\"{}\"", q.replace('"', "\"\""));
             return self.rows(
-                "SELECT d.id, d.title, d.plain FROM docs_fts f JOIN docs d ON d.id = f.id
+                "SELECT d.id, d.title, d.plain FROM docs_fts f JOIN docs d ON d.fts = f.rowid
                  WHERE docs_fts MATCH ?1 AND d.deleted = 0
                  ORDER BY (instr(lower(d.title), lower(?2)) > 0) DESC, d.updated DESC LIMIT ?3",
                 params![phrase, q, limit as i64],
@@ -481,29 +658,71 @@ impl Store {
     }
 
     /// 可能引用嵌入对象的全部 JSON：文档（含回收站）、用户模板、同步块（资源回收时扫描引用用）。
-    pub fn reference_texts(&self) -> Vec<String> {
+    /// 用独立连接读（后台回收时不占界面线程的读连接）；任何一行读失败都返回错误——
+    /// 引用集合不完整时回收会误删仍在使用的对象，宁可这次不回收。
+    pub fn reference_texts(&self) -> Result<Vec<String>> {
         self.flush();
-        self.rows("SELECT content FROM docs UNION ALL SELECT content FROM templates UNION ALL SELECT blocks FROM sync_blocks", [], |r| r.get(0))
+        let c = self.open_reader()?;
+        let mut st = c.prepare("SELECT content FROM docs UNION ALL SELECT content FROM templates UNION ALL SELECT blocks FROM sync_blocks")?;
+        let v = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(v)
+    }
+
+    /// 资源回收用：数据库里所有可能引用 `assets/` 文件的文本（含二进制对象里的 JSON 片段）。
+    /// 任何一处读失败都返回错误（引用不完整时回收会误删）。
+    pub fn asset_reference_texts(&self) -> Result<Vec<String>> {
+        self.flush();
+        let c = self.open_reader()?;
+        let mut out = vec![];
+        for sql in [
+            "SELECT content FROM docs",
+            "SELECT content FROM templates",
+            "SELECT blocks FROM sync_blocks",
+            "SELECT data FROM objects",
+            "SELECT data FROM base_tables",
+            "SELECT data FROM base_fields",
+            "SELECT data FROM base_records",
+            "SELECT data FROM base_views",
+            "SELECT COALESCE(image, '') || ' ' || COALESCE(favicon, '') FROM link_cards",
+            "SELECT v FROM kv",
+        ] {
+            let mut st = c.prepare(sql)?;
+            // 电子表格对象是二进制（扩展 JSON 在末尾），按字节读再有损转文本
+            let rows = st.query_map([], |r| {
+                Ok(match r.get_ref(0)? {
+                    rusqlite::types::ValueRef::Text(b) | rusqlite::types::ValueRef::Blob(b) => String::from_utf8_lossy(b).into_owned(),
+                    _ => String::new(),
+                })
+            })?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        Ok(out)
     }
 
     // ───────────── 嵌入对象 ─────────────
 
-    /// 保存对象：同一对象未写的旧版本会被替换。`encode` 在写线程里执行。
-    pub fn save_object_with(&self, id: &str, kind: &str, encode: impl FnOnce() -> Vec<u8> + Send + 'static) {
+    /// 保存对象：同一对象未写的旧版本会被替换。`encode` 在写线程里执行；编码失败时不写入（不会用空内容覆盖原数据）。
+    pub fn save_object_with(&self, id: &str, kind: &str, encode: impl FnOnce() -> Result<Vec<u8>, String> + Send + 'static) {
         let (oid, kind) = (id.to_string(), kind.to_string());
         self.write(Some(format!("obj:{id}")), move |c| {
-            let data = encode();
+            let data = encode().map_err(|e| encode_error("嵌入对象", e))?;
+            if data.is_empty() {
+                return Err(encode_error("嵌入对象", "编码结果为空"));
+            }
             c.execute("INSERT OR REPLACE INTO objects (id, kind, data, updated) VALUES (?1, ?2, ?3, ?4)", params![oid, kind, data, now_ms()]).map(|_| ())
         });
     }
 
-    pub fn save_object(&self, id: &str, kind: &str, data: Vec<u8>) {
+    pub fn save_object(&self, id: &str, kind: &str, data: Result<Vec<u8>, String>) {
         self.save_object_with(id, kind, move || data);
     }
 
-    pub fn load_object(&self, id: &str) -> Option<(String, Vec<u8>)> {
+    /// 读对象原始字节：`Ok(None)` 表示不存在，`Err` 表示读取失败（两者必须区分，否则读失败会被当成「新对象」覆盖）。
+    pub fn load_object(&self, id: &str) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
         self.flush();
-        self.row("SELECT kind, data FROM objects WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+        self.try_row("SELECT kind, data FROM objects WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
     }
 
     /// 对象的 (id, kind, 更新时间)。
@@ -527,6 +746,10 @@ impl Store {
     // ───────────── 同步块 ─────────────
 
     pub fn save_sync(&self, id: &str, blocks_json: &str, source: &str) {
+        if blocks_json.is_empty() {
+            self.report_error("保存同步块失败：内容序列化失败，已跳过本次写入");
+            return;
+        }
         let (sid, json, src) = (id.to_string(), blocks_json.to_string(), source.to_string());
         self.write(Some(format!("sync:{id}")), move |c| {
             c.execute("INSERT OR REPLACE INTO sync_blocks (id, blocks, source, updated) VALUES (?1, ?2, ?3, ?4)", params![sid, json, src, now_ms()]).map(|_| ())
@@ -555,7 +778,7 @@ impl Store {
         self.write(Some(format!("card:{url}")), move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO link_cards (url, title, descr, image, favicon, site, fetched_at, ok) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![url, c.title, c.descr, c.image, c.favicon, c.site, now_ms(), c.ok as i64],
+                params![url, c.title, c.descr, crate::assets::to_ref(&c.image), crate::assets::to_ref(&c.favicon), c.site, now_ms(), c.ok as i64],
             )
             .map(|_| ())
         });
@@ -564,7 +787,14 @@ impl Store {
     pub fn load_link_card(&self, url: &str) -> Option<LinkCardRow> {
         self.row("SELECT title, descr, image, favicon, site, ok FROM link_cards WHERE url = ?1", [url], |r| {
             let s = |i: usize| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default);
-            Ok(LinkCardRow { title: s(0)?, descr: s(1)?, image: s(2)?, favicon: s(3)?, site: s(4)?, ok: r.get::<_, i64>(5)? != 0 })
+            Ok(LinkCardRow {
+                title: s(0)?,
+                descr: s(1)?,
+                image: crate::assets::resolve(&s(2)?),
+                favicon: crate::assets::resolve(&s(3)?),
+                site: s(4)?,
+                ok: r.get::<_, i64>(5)? != 0,
+            })
         })
     }
 
@@ -572,6 +802,10 @@ impl Store {
 
     pub fn save_template(&self, name: &str, content_json: &str) -> String {
         let id = new_uuid();
+        if content_json.is_empty() {
+            self.report_error("保存模板失败：内容序列化失败");
+            return id;
+        }
         let (tid, name, json) = (id.clone(), name.to_string(), content_json.to_string());
         self.write_sync(move |c| {
             c.execute("INSERT INTO templates (id, name, content, created) VALUES (?1, ?2, ?3, ?4)", params![tid, name, json, now_ms()]).map(|_| ())
@@ -775,19 +1009,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 在独立目录里起一个 Store（不碰进程级环境变量）。
+    fn temp_store(tag: &str) -> (Store, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("stonebrook-{tag}-{}", new_uuid()));
+        (Store::open_in(&dir).unwrap(), dir)
+    }
+
+    #[test]
+    fn writer_survives_panicking_job() {
+        let (s, dir) = temp_store("panic");
+        s.write(None, |_| panic!("故意的 panic"));
+        assert!(s.flush_timeout(Duration::from_secs(5)), "panic 后 flush 不能卡死");
+        let err = s.take_error().expect("panic 要进错误通道");
+        assert!(err.contains("故意的 panic"), "{err}");
+        // 写线程仍然在工作
+        s.set_kv("after", "1");
+        assert!(s.flush());
+        assert_eq!(s.get_kv("after").as_deref(), Some("1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encode_failure_does_not_overwrite_object() {
+        let (s, dir) = temp_store("encode");
+        s.save_object("a".repeat(32).as_str(), "board", Ok(b"{\"v\":1}".to_vec()));
+        s.flush(); // 否则两次保存会按 key 合并，只执行后一次
+        s.save_object("a".repeat(32).as_str(), "board", Err("坏数据".into()));
+        s.flush();
+        assert!(s.take_error().is_some());
+        let (_, bytes) = s.load_object(&"a".repeat(32)).unwrap().unwrap();
+        assert_eq!(bytes, b"{\"v\":1}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coalesced_job_runs_after_earlier_jobs() {
+        let (s, dir) = temp_store("order");
+        // 堵住写线程，保证后面三个任务同时在队列里
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let g = gate.clone();
+        s.write(None, move |_| {
+            let mut open = g.0.lock().unwrap();
+            while !*open {
+                open = g.1.wait(open).unwrap();
+            }
+            Ok(())
+        });
+        s.set_kv("k", "A1");
+        s.write(None, |c| c.execute("UPDATE kv SET v = v || '+B' WHERE k = 'k'", []).map(|_| ()));
+        s.set_kv("k", "A2");
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        s.flush();
+        // A1 被撤掉，执行顺序为 B、A2：B 时还没有这行，最终是 A2
+        assert_eq!(s.get_kv("k").as_deref(), Some("A2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_connection_rejects_writes() {
+        let (s, dir) = temp_store("ro");
+        let r = s.with_conn(|c| c.execute("INSERT INTO kv (k, v) VALUES ('x', 'y')", []));
+        assert!(r.is_err(), "只读连接不能写");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_newer_schema_and_backs_up_before_migrating() {
+        let dir = std::env::temp_dir().join(format!("stonebrook-mig-{}", new_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(DB_FILE);
+        // 造一个 v2 的库（迁移 1、2），放一篇文档
+        {
+            let c = open_conn(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().take(2).enumerate() {
+                c.execute_batch(sql).unwrap();
+                c.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+            }
+            c.execute("INSERT INTO docs (id, title, created, updated, content, plain) VALUES ('d1', '迁移测试文档', 0, 0, '{}', '正文内容在这里')", [])
+                .unwrap();
+            c.execute("INSERT INTO docs_fts (id, title, plain) VALUES ('d1', '迁移测试文档', '正文内容在这里')", []).unwrap();
+        }
+        let mut c = open_conn(&path).unwrap();
+        migrate(&mut c, Some(&dir)).unwrap();
+        let backups: Vec<_> = std::fs::read_dir(dir.join("recovery")).unwrap().flatten().collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].file_name().to_string_lossy().starts_with("pre-migrate-v2-"));
+        let ver: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(ver as usize, MIGRATIONS.len());
+        let hit: String =
+            c.query_row("SELECT d.id FROM docs_fts f JOIN docs d ON d.fts = f.rowid WHERE docs_fts MATCH '\"内容在\"'", [], |r| r.get(0)).unwrap();
+        assert_eq!(hit, "d1", "存量文档迁到按 rowid 关联的索引");
+        // 库版本比代码新：拒绝打开
+        c.pragma_update(None, "user_version", (MIGRATIONS.len() + 1) as i64).unwrap();
+        assert!(migrate(&mut c, Some(&dir)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn writer_coalesces_and_flushes() {
-        let dir = std::env::temp_dir().join(format!("stonebrook-store-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut w = open_conn(&dir.join("t.db")).unwrap();
-        migrate(&mut w).unwrap();
-        let conn = open_conn(&dir.join("t.db")).unwrap();
-        let writer = Arc::new(Writer { q: Mutex::new(Queue::default()), cv: Condvar::new() });
-        let error = Arc::new(Mutex::new(None));
-        let (wc, ec) = (writer.clone(), error.clone());
-        std::thread::spawn(move || wc.run(w, ec));
-        let s = Store { conn: Arc::new(Mutex::new(conn)), writer, error, data_dir: dir.clone() };
+        let (s, dir) = temp_store("store-test");
         for i in 0..50 {
             s.set_kv("k", &i.to_string());
         }
@@ -796,7 +1117,12 @@ mod tests {
         let id = s.create(None, &DocContent::new_empty("测试文档标题"));
         assert_eq!(s.search("文档标", 10).len(), 1, "FTS 命中");
         assert_eq!(s.search("文档", 10).len(), 1, "短查询回退扫描");
+        s.save(&id, &DocContent::new_empty("改过的标题内容"));
+        s.flush();
+        assert!(s.search("文档标", 10).is_empty(), "保存后旧索引被替换");
+        assert_eq!(s.search("过的标", 10).len(), 1);
         s.purge(&id);
+        assert!(s.search("过的标", 10).is_empty());
         assert!(s.search("文档标", 10).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

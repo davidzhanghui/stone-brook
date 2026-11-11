@@ -1020,6 +1020,8 @@ pub struct Base {
     sched_last: HashMap<String, i64>,
     /// 最近若干次提交改了什么（视图结果据此增量更新，见 `calc::refresh_rows`）
     pub log: std::collections::VecDeque<CommitInfo>,
+    /// 装载时读不出来的数据表 id：界面上不显示，但保存元数据时原样保留（不能因为读失败就把表从元数据里抹掉）
+    pub unreadable: Vec<String>,
 }
 
 /// 一次提交的摘要：改动的记录、是否改了字段定义、哪些计算列被整列失效。
@@ -1058,6 +1060,7 @@ impl Base {
             notices: vec![],
             sched_last: HashMap::new(),
             log: Default::default(),
+            unreadable: vec![],
         }
     }
 
@@ -1073,6 +1076,20 @@ impl Base {
 
     pub fn table(&self, tid: &str) -> Option<&Table> {
         self.tables.get(tid)
+    }
+
+    /// 落盘用的元数据：把装载时读不出来的数据表补回去，保证读失败不会改动持久化的表清单。
+    pub fn meta_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        if self.unreadable.is_empty() {
+            return crate::assets::encode(&self.meta);
+        }
+        let mut meta = self.meta.clone();
+        for t in &self.unreadable {
+            if !meta.tables.contains(t) {
+                meta.tables.push(t.clone());
+            }
+        }
+        crate::assets::encode(&meta)
     }
 
     pub fn table_list(&self) -> Vec<&Table> {
@@ -1985,7 +2002,16 @@ fn coalesce(changes: Vec<Change>) -> Vec<Change> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Base, FieldType, Value, ViewKind};
+    use super::{Base, BaseMeta, FieldType, Value, ViewKind};
+
+    #[test]
+    fn unreadable_tables_stay_in_persisted_meta() {
+        let mut b = base();
+        b.unreadable = vec!["lost".into()];
+        let meta: BaseMeta = serde_json::from_slice(&b.meta_bytes().unwrap()).unwrap();
+        assert!(meta.tables.contains(&"lost".to_string()), "读不出来的表不能从元数据里抹掉");
+        assert!(!b.meta.tables.contains(&"lost".to_string()), "但界面上不显示");
+    }
 
     fn base() -> Base {
         let mut b = Base::new_default("t", ViewKind::Grid);

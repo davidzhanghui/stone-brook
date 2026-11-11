@@ -6121,7 +6121,7 @@ dependencies = [
 
 [[package]]
 name = "stonebrook"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6157,11 +6157,13 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smallvec",
  "symphonia",
  "ttf-parser 0.25.1",
  "unicode-segmentation",
  "ureq",
+ "url",
  "uuid",
  "zip 2.6.1",
 ]

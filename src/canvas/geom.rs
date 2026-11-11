@@ -708,44 +708,7 @@ fn more_shape_cmds(kind: ShapeKind, r: Rect) -> (Vec<PathCmd>, Vec<PathCmd>) {
             deco.extend(dashed_v(cx, y + hh, y + h));
             (body, deco)
         }
-        ShapeKind::LifeActor | ShapeKind::LifeBoundary | ShapeKind::LifeControl | ShapeKind::LifeEntity => {
-            let ih = life_icon(r);
-            let s = ih * 0.8;
-            let (body, mut deco) = match kind {
-                ShapeKind::LifeActor => (vec![], stick_figure(rect(cx - s * 0.4, y, s * 0.8, ih))),
-                ShapeKind::LifeBoundary => {
-                    let rr = ih * 0.36;
-                    let cc = pt(cx + rr * 0.35, y + ih / 2.);
-                    let lx = cc.x - rr * 1.9;
-                    let mut d = seg(pt(lx, cc.y - rr), pt(lx, cc.y + rr)).to_vec();
-                    d.extend(seg(pt(lx, cc.y), pt(cc.x - rr, cc.y)));
-                    (ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)), d)
-                }
-                ShapeKind::LifeControl => {
-                    let rr = ih * 0.38;
-                    let cc = pt(cx, y + ih / 2. + 2.);
-                    let top = pt(cx, cc.y - rr);
-                    // 圆顶上的小箭头
-                    let a = rr * 0.45;
-                    (
-                        ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)),
-                        vec![
-                            PathCmd::Move(pt(top.x + a * 0.2, top.y - a * 0.7)),
-                            PathCmd::Line(pt(top.x - a * 0.6, top.y)),
-                            PathCmd::Line(pt(top.x + a * 0.2, top.y + a * 0.7)),
-                        ],
-                    )
-                }
-                _ => {
-                    let rr = ih * 0.36;
-                    let cc = pt(cx, y + ih / 2. - 2.);
-                    (ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)), seg(pt(cc.x - rr, cc.y + rr + 3.), pt(cc.x + rr, cc.y + rr + 3.)).to_vec())
-                }
-            };
-            // 图标下方是名字，名字下面才是生命线
-            deco.extend(dashed_v(cx, y + ih + 22., y + h));
-            (body, deco)
-        }
+        ShapeKind::LifeActor | ShapeKind::LifeBoundary | ShapeKind::LifeControl | ShapeKind::LifeEntity => more_shape_cmds_life_actor(kind, r, cx, h, y),
         ShapeKind::Activation => (round_rect_cmds(r, 2f32.min(w / 3.)), none),
         ShapeKind::FrameAlt => (rect_body(), dashed_h(x, x + w, cy)),
         ShapeKind::Component => {
@@ -789,6 +752,45 @@ fn more_shape_cmds(kind: ShapeKind, r: Rect) -> (Vec<PathCmd>, Vec<PathCmd>) {
         }
         _ => (rect_body(), none),
     }
+}
+/// 从 `more_shape_cmds` 拆出。
+fn more_shape_cmds_life_actor(kind: ShapeKind, r: Rect, cx: f32, h: f32, y: f32) -> (Vec<PathCmd>, Vec<PathCmd>) {
+    let ih = life_icon(r);
+    let s = ih * 0.8;
+    let (body, mut deco) = match kind {
+        ShapeKind::LifeActor => (vec![], stick_figure(rect(cx - s * 0.4, y, s * 0.8, ih))),
+        ShapeKind::LifeBoundary => {
+            let rr = ih * 0.36;
+            let cc = pt(cx + rr * 0.35, y + ih / 2.);
+            let lx = cc.x - rr * 1.9;
+            let mut d = seg(pt(lx, cc.y - rr), pt(lx, cc.y + rr)).to_vec();
+            d.extend(seg(pt(lx, cc.y), pt(cc.x - rr, cc.y)));
+            (ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)), d)
+        }
+        ShapeKind::LifeControl => {
+            let rr = ih * 0.38;
+            let cc = pt(cx, y + ih / 2. + 2.);
+            let top = pt(cx, cc.y - rr);
+            // 圆顶上的小箭头
+            let a = rr * 0.45;
+            (
+                ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)),
+                vec![
+                    PathCmd::Move(pt(top.x + a * 0.2, top.y - a * 0.7)),
+                    PathCmd::Line(pt(top.x - a * 0.6, top.y)),
+                    PathCmd::Line(pt(top.x + a * 0.2, top.y + a * 0.7)),
+                ],
+            )
+        }
+        _ => {
+            let rr = ih * 0.36;
+            let cc = pt(cx, y + ih / 2. - 2.);
+            (ellipse_cmds(rect(cc.x - rr, cc.y - rr, 2. * rr, 2. * rr)), seg(pt(cc.x - rr, cc.y + rr + 3.), pt(cc.x + rr, cc.y + rr + 3.)).to_vec())
+        }
+    };
+    // 图标下方是名字，名字下面才是生命线
+    deco.extend(dashed_v(cx, y + ih + 22., y + h));
+    (body, deco)
 }
 
 /// 从形状中心指向 toward 的射线与形状边界的交点（连线端点贴边用）。
@@ -881,21 +883,9 @@ pub fn polyline_cmds(pts: &[Pt]) -> Vec<PathCmd> {
     pts.iter().enumerate().map(|(i, p)| if i == 0 { PathCmd::Move(*p) } else { PathCmd::Line(*p) }).collect()
 }
 
-/// 折线长度的中点及该处方向。
+/// 折线按长度的中点。
 pub fn polyline_mid(pts: &[Pt]) -> Pt {
-    if pts.len() < 2 {
-        return pts.first().copied().unwrap_or_default();
-    }
-    let total: f32 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
-    let mut acc = 0.;
-    for w in pts.windows(2) {
-        let d = w[0].dist(w[1]);
-        if acc + d >= total / 2. && d > 0. {
-            return w[0].lerp(w[1], (total / 2. - acc) / d);
-        }
-        acc += d;
-    }
-    pts[pts.len() - 1]
+    super::math::polyline_mid(pts).unwrap_or_default()
 }
 
 /// 箭头标记：返回 (路径, 是否填充)。tip 为线端点，from 为线上靠近端点的前一个点。

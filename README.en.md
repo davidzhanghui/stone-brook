@@ -7,11 +7,12 @@
 
 A local-only block editor, written in **Rust + [GPUI](https://github.com/zed-industries/zed)** (Zed's GPU UI framework) and drawn directly with Metal.
 The interface is its own: block editing, a `/` slash menu, a floating toolbar, and paste-from-web that keeps the formatting, plus four full-screen editors for boards, sketches, spreadsheets, and databases.
-No account, no cloud. Everything lives in one SQLite file on your machine (only link cards reach the network, and that can be turned off in Settings).
+No account, no cloud. Everything lives in one SQLite file on your machine (only link cards and the update check reach the network, and both can be turned off in Settings).
 
 ![logo](assets/logo-256.png)
 
-- Version **2.2.0**. macOS 12+ only (AppKit, WKWebView, AVFoundation).
+- Version **2.3.0**. macOS 12+ only (AppKit, WKWebView, AVFoundation).
+- The English UI covers the main window (sidebar, menus, command palette, settings, slash menu, toolbars). The full-screen board, spreadsheet, and database editors are not translated yet and still show Chinese.
 - Full feature list (Chinese): [docs/FEATURES.md](docs/FEATURES.md)
 - Website (Chinese): <https://davidzhanghui.github.io/stone-book/>
 
@@ -57,15 +58,20 @@ scripts/build.sh --fast --run  # package only, then launch (quits a copy that is
 
 The build is ad-hoc signed. The first launch may need approval under System Settings → Privacy & Security.
 
+**In-app updates**: at most once a day the app checks GitHub Releases for a newer version (turn this off under Settings → Updates, or press "Check for updates"; also in the app menu). A new version's `.app.zip` for your architecture downloads in the background and is verified against the release's `SHA256SUMS.txt`; a mismatch is never installed. Then press "Restart and install", or it is swapped in the next time you quit normally. The previous version is kept at `<data dir>/updates/previous.app`. Automatic install only works when running from a `.app` bundle (`cargo run` only downloads).
+
 ## Data and durability
 
 - **Where it lives**: `~/Stonebrook/` (override with `STONEBROOK_DATA_DIR`): `stonebrook.db` plus an `assets/` directory. Copy the folder and you have a backup.
-- **Full backup / restore**: 文件 → 导出完整备份… (also in the `···` menu and the command palette) zips a `stonebrook.db` snapshot together with `assets/`. 从备份恢复… checks the archive and stages it; it **takes effect after restart**. The previous data is moved to `recovery/pre-restore-<time>/` and is not deleted. Image paths inside documents, boards, and databases are rewritten when you move to another machine (different username or directory). Images inside spreadsheet cells still need the same path to show up.
-- **Writes**: every write goes through one background thread and runs in submit order. Document and embed saves are coalesced by key, so only the latest snapshot is written. The UI thread uses a separate read-only connection (WAL: readers and the writer do not block each other). Quit and window close wait for the queue to drain.
-- **Failures stay visible**: a failed write shows the reason at the top of the window. Data is not dropped silently.
-- **Corruption**: if a document's JSON cannot be parsed, the original is copied to `recovery/`, a short explanation document is opened, and empty content is never written back over it.
-- **Upgrades**: the schema version is `PRAGMA user_version`. On startup the migrations in `store::MIGRATIONS` run in order.
-- **Garbage collection**: on startup, a background pass deletes embed objects that have not been referenced for 7 days by any document (including trash), user template, or synced block.
+- **Full backup / restore**: 文件 → 导出完整备份… (also in the `···` menu and the command palette) zips a `stonebrook.db` snapshot together with `assets/`. 从备份恢复… checks the archive and stages it; it **takes effect after restart**. The previous data is moved to `recovery/pre-restore-<time>/` and is not deleted. Asset references are stored as relative paths (`stonebrook://asset/<file>`; they are expanded to absolute paths only in memory), so the whole data directory can be moved or copied to another machine as is.
+- **Writes**: every write goes through one background thread and runs in submit order. Document and embed saves are coalesced by key, so only the latest snapshot is written (the coalesced job moves to the back of the queue, so it never jumps ahead of earlier writes). The UI thread uses a separate read-only connection (`query_only`; WAL: readers and the writer do not block each other). A failing or panicking job does not stop later saves. Quit and window close wait for the queue to drain (up to 10 seconds, with a notice on timeout).
+- **Failures stay visible**: failed writes, failed reads, and serialization errors show the reason at the top of the window. When serialization fails nothing is written, so empty content never overwrites your data.
+- **Corruption**: if a document's JSON cannot be parsed, the original is copied to `recovery/`, a short explanation document is opened, and empty content is never written back over it. If a board, sketch, spreadsheet, or database cannot be decoded, its raw bytes are also copied to `recovery/` and the editor refuses to open (no "empty board"). Unreadable tables or rows inside a database are skipped with a notice; the stored data is left untouched.
+- **Forward compatibility**: an older version keeps unknown block types as they are, and also writes back unknown fields on known blocks.
+- **Upgrades**: the schema version is `PRAGMA user_version`. On startup the migrations in `store::MIGRATIONS` run in order, after the database is copied to `recovery/pre-migrate-v<N>-<time>.db`. A database from a newer version is refused with a prompt to upgrade.
+- **Garbage collection**: on startup, a background pass deletes embed objects that have not been referenced for 7 days by any document (including trash), user template, or synced block. Files in `assets/` that nothing has referenced for 7 days are removed as well, and `cache/` (video posters, web snapshots and other rebuildable data) is trimmed to 80% by modification time once it passes 512MB.
+- **Memory**: the caches for embed objects, link cards, attachment thumbnails, waveforms, formulas and icons are bounded LRUs (`src/lru.rs`); objects with unsaved changes or still held by an editor are never evicted.
+- **WebView isolation**: every WKWebView uses a non-persistent data store (no cookies or local storage survive) and a navigation delegate: pages may only navigate within local content, and external links open in your browser. Link-card fetching refuses private / loopback addresses and checks every redirect hop.
 
 ## Architecture
 
@@ -74,7 +80,7 @@ flowchart TB
     subgraph UI["UI thread · GPUI"]
         WS["Workspace<br/>sidebar / top bar / outline / panels"]
         ED["Editor<br/>list() virtual list"]
-        EMB["Full-screen editors<br/>board / spreadsheet / database"]
+        EMB["Full-screen editors<br/>board / sketch / spreadsheet / database"]
     end
     subgraph Core["Model"]
         MODEL["DocContent<br/>Vec&lt;Arc&lt;Block&gt;&gt;"]
@@ -121,21 +127,23 @@ Design notes:
 | `src/main.rs` | Startup, shortcuts and menus, `flush_all` before exit |
 | `src/store.rs` | SQLite: writer thread and coalesce queue, migrations, full-text search, comments / templates / synced blocks / key-value |
 | `src/model.rs` | Blocks and rich text, JSON serialization, version compatibility |
-| `src/objects.rs` | Embed registry (`ObjKind`), save policy, garbage collection |
-| `src/editor/` | Document editor: `ops` edits, `nav` cursor and hit testing, `clip` clipboard, `input` IME, `render` block painting; `table_render` / `menus_render` / `toolbar_render`; `attach` / `media` / `fileview` for attachments and video |
+| `src/objects.rs`, `src/embed.rs` | Embed registry (`ObjKind`), save policy, LRU object cache and garbage collection; the `EmbedEditor` trait shared by the four full-screen editors |
+| `src/assets.rs`, `src/lru.rs` | Relative asset paths (converted at the persistence boundary), asset GC and cache trimming; generic LRU |
+| `src/updater.rs` | In-app updates: release check, download and verification, swapping the `.app` after quit |
+| `src/editor/` | Document editor (state split into `EditCore` selection and undo / `DocSession` per-document UI state reset on switch / `RenderCaches` / `ToolbarState`): `ops` edits, `nav` cursor and hit testing, `clip` clipboard, `input` IME, `render` block painting; `table_render` / `menus_render` / `toolbar_render`; `attach` / `media` / `fileview` for attachments and video |
 | `src/workspace.rs`, `src/workspace/` | Main window; settings, command palette, presentation, PDF export, writing stats |
 | `src/convert.rs` | HTML / Markdown import and export (paste-from-web) |
-| `src/canvas/`, `src/diagram/` | 2D scene graph and painting; Mermaid / PlantUML parsing and layered layout |
+| `src/canvas/`, `src/diagram/` | 2D scene graph and painting, with `canvas::math` holding the geometry shared by boards and sketches (point-segment distance, polygon hit tests, resize handles, align / distribute); Mermaid / PlantUML parsing and layered layout |
 | `src/board/` | Board, flowchart, and mind-map model plus the full-screen editor |
 | `src/sketch/` | Excalidraw-compatible sketch: the official `.excalidraw` model, hand-drawn renderer, import/export, and the full-screen editor |
-| `src/sheet/` | Spreadsheet UI (`commands`, `mouse`, `paint`; calculation is IronCalc) |
+| `src/sheet/` | Spreadsheet UI (`commands` static command table, `mouse`, `paint`; calculation is IronCalc) |
 | `src/base/` | Database: `model` data and undo, `db` row storage, `formula` / `calc`, `editor` / `chrome` |
 | `src/highlight.rs` | Syntax highlighting shared by code blocks, text boxes, and attachment preview |
 | `src/webview.rs`, `src/math.rs`, `src/linkcard.rs`, `src/media.rs` | Offscreen WebView, KaTeX, link-card fetch (honors the system proxy), video |
 | `src/autotest.rs`, `src/*/script.rs` | Scripted end-to-end tests (`dev` feature) |
 | `vendor/` | Patched GPUI 0.2.2 and IronCalc 0.9.1. See [docs/VENDOR_PATCHES.md](docs/VENDOR_PATCHES.md) (Chinese) |
 
-About 86,000 lines of Rust. Main dependencies: `gpui`, `ironcalc`, `rusqlite` (bundled SQLite with FTS5), `roughr` (sketch style), `resvg`, `pulldown-cmark`, `scraper` + `ureq` (link cards), `symphonia` (audio), `objc2-*` (system APIs). The release binary is about 37MB.
+About 106,000 lines of Rust. Main dependencies: `gpui`, `ironcalc`, `rusqlite` (bundled SQLite with FTS5), `roughr` (sketch style), `resvg`, `pulldown-cmark`, `scraper` + `ureq` (link cards), `symphonia` (audio), `objc2-*` (system APIs). The release binary is about 37MB.
 
 ## Development
 

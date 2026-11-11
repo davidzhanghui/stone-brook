@@ -6,11 +6,11 @@
 
 纯本地的块级文档编辑器，用 **Rust + [GPUI](https://github.com/zed-industries/zed)**（Zed 的 GPU UI 框架）编写，Metal 直接绘制。
 交互与界面自成一体：块编辑、`/` 斜杠菜单、浮动工具栏、网页粘贴即还原，外加画板、草图、电子表格、多维表格四个全屏编辑器。
-没有账号、没有云端，数据只在本机一个 SQLite 文件里（只有「网页卡片」会按需联网，可在设置中关闭）。
+没有账号、没有云端，数据只在本机一个 SQLite 文件里（只有「网页卡片」和「检查更新」会联网，可在设置中一键关闭）。
 
 ![logo](assets/logo-256.png)
 
-- 版本 **2.2.0**，仅支持 macOS 12+（依赖 AppKit、WKWebView、AVFoundation）
+- 版本 **2.3.0**，仅支持 macOS 12+（依赖 AppKit、WKWebView、AVFoundation）
 - 完整功能清单：[docs/FEATURES.md](docs/FEATURES.md)
 - 官网：<https://davidzhanghui.github.io/stone-book/>
 
@@ -56,15 +56,20 @@ scripts/build.sh --fast --run  # 跳过检查只打包，并启动（已运行�
 
 产物用 ad-hoc 签名，首次打开可能需要在「系统设置 → 隐私与安全性」中放行。
 
+**应用内更新**：每天最多检查一次 GitHub Releases 的最新版本（「设置 → 更新」可关闭自动更新，或点「检查更新」；菜单「石渠 → 检查更新…」）。发现新版本后在后台下载本机架构的 `.app.zip`，按发布里的 `SHA256SUMS.txt` 校验，校验不过不安装；下载好后点「重启并安装」，或者下次正常退出时自动替换。旧版本保留在 `<数据目录>/updates/previous.app`。只有从 `.app` 启动时才能自动安装（`cargo run` 只下载）。
+
 ## 数据与可靠性
 
 - **位置**：`~/Stonebrook/`（环境变量 `STONEBROOK_DATA_DIR` 可覆盖）：`stonebrook.db` + `assets/` 资源目录，复制即备份。
-- **完整备份 / 恢复**：「文件 → 导出完整备份…」（或 `···` 菜单、命令面板）打包 `stonebrook.db` 快照 + `assets/` 为一个 zip；「从备份恢复…」校验后暂存，**重启后生效**，原数据移到 `recovery/pre-restore-<时间>/`，不会删除。换机器（用户名 / 目录不同）时文档、画板、多维表格里的图片路径自动改写；电子表格单元格里的图片需路径一致才能显示。
-- **写入**：所有写操作进同一个后台写线程，按提交顺序执行；文档与嵌入对象的保存按 key 合并，只写最新快照。界面线程用另一条只读连接（WAL 模式下读写互不阻塞）。退出、关窗口前等写队列清空。
-- **失败可见**：写库失败会在界面顶部提示原因，不会静默丢数据。
-- **损坏保护**：文档 JSON 无法解析时，原文备份到 `recovery/`，打开一篇说明文档，不会把空内容写回去覆盖。
-- **升级**：表结构用 `PRAGMA user_version` 记版本，启动时按顺序执行 `store::MIGRATIONS` 里的升级脚本。
-- **回收**：启动时后台删除 7 天以上没被文档（含回收站）、用户模板、同步块引用的嵌入对象。
+- **完整备份 / 恢复**：「文件 → 导出完整备份…」（或 `···` 菜单、命令面板）打包 `stonebrook.db` 快照 + `assets/` 为一个 zip；「从备份恢复…」校验后暂存，**重启后生效**，原数据移到 `recovery/pre-restore-<时间>/`，不会删除。数据库里引用资源一律存相对路径（`stonebrook://asset/<文件名>`，内存里才展开成绝对路径），所以整个数据目录可以随意搬家、换机器，不用改写。
+- **写入**：所有写操作进同一个后台写线程，按提交顺序执行；文档与嵌入对象的保存按 key 合并，只写最新快照（合并后的任务排到队尾，不会越过之前提交的写入）。界面线程用另一条只读连接（`query_only`，WAL 模式下读写互不阻塞）。单个写任务出错或崩溃不会影响后续保存；退出、关窗口前等写队列清空（最多等 10 秒，超时会提示）。
+- **失败可见**：写库失败、读取失败、序列化失败都会在界面顶部提示原因；序列化失败时不写入，不会用空内容覆盖原数据。
+- **损坏保护**：文档 JSON 无法解析时，原文备份到 `recovery/`，打开一篇说明文档，不会把空内容写回去覆盖。画板 / 草图 / 电子表格 / 多维表格的数据无法解码时，原始字节同样备份到 `recovery/`，并拒绝打开编辑器（不会出现「空白画板」）；多维表格里个别读不出来的数据表 / 行会跳过并提示，原始数据保留不动。
+- **向前兼容**：旧版本读到新版本的块类型时原样保留；读到已有块上的新字段也会原样写回。
+- **升级**：表结构用 `PRAGMA user_version` 记版本，启动时按顺序执行 `store::MIGRATIONS` 里的升级脚本；执行前先把数据库复制到 `recovery/pre-migrate-v<N>-<时间>.db`。数据库来自更新版本时拒绝打开并提示升级。
+- **回收**：启动时后台删除 7 天以上没被文档（含回收站）、用户模板、同步块引用的嵌入对象；`assets/` 里 7 天以上没被任何数据引用的文件同样回收；`cache/`（视频封面、网页快照等可重建的缓存）超过 512MB 时按最近修改时间淘汰到 80%。
+- **内存**：嵌入对象、网页卡片、附件缩略图、波形、公式、图标等缓存都是带容量的 LRU（`src/lru.rs`），长时间使用不会只涨不降；还有未保存修改、或正被编辑器使用的对象不会被淘汰。
+- **WebView 隔离**：所有离屏 / 内嵌 WKWebView 用非持久化数据仓库（不留 Cookie / LocalStorage），并挂导航代理：页面只能在本地内容内跳转，点外链交给系统浏览器打开；网页卡片抓取拒绝内网 / 回环地址，重定向逐跳检查。
 
 ## 架构
 
@@ -73,7 +78,7 @@ flowchart TB
     subgraph UI["界面线程 · GPUI"]
         WS["Workspace<br/>侧边栏 / 顶栏 / 大纲 / 面板"]
         ED["Editor<br/>list() 虚拟列表"]
-        EMB["全屏编辑器<br/>画板 / 电子表格 / 多维表格"]
+        EMB["全屏编辑器<br/>画板 / 草图 / 电子表格 / 多维表格"]
     end
     subgraph Core["模型"]
         MODEL["DocContent<br/>Vec&lt;Arc&lt;Block&gt;&gt;"]
@@ -120,21 +125,23 @@ flowchart TB
 | `src/main.rs` | 启动、快捷键与菜单、退出前 `flush_all` |
 | `src/store.rs` | SQLite：写线程与合并队列、迁移、全文搜索、评论 / 模板 / 同步块 / 键值 |
 | `src/model.rs` | 块与富文本模型、JSON 序列化与版本兼容 |
-| `src/objects.rs` | 嵌入对象注册表（`ObjKind`）、保存策略、资源回收 |
-| `src/editor/` | 文档编辑器：`ops` 编辑操作、`nav` 光标与命中、`clip` 剪贴板、`input` 输入法、`render` 块渲染，`table_render` / `menus_render` / `toolbar_render` 表格、菜单、工具栏，`attach` / `media` / `fileview` 附件与视频 |
+| `src/objects.rs`、`src/embed.rs` | 嵌入对象注册表（`ObjKind`）、保存策略、对象 LRU 缓存与回收；四个全屏编辑器的统一接口 `EmbedEditor` |
+| `src/assets.rs`、`src/lru.rs` | 资源相对路径（持久化边界转换）、assets 回收与 cache 淘汰；通用 LRU |
+| `src/updater.rs` | 应用内更新：查 Releases、下载校验、退出后替换 `.app` |
+| `src/editor/` | 文档编辑器（状态拆成 `EditCore` 选区与撤销 / `DocSession` 换文档即重置的界面状态 / `RenderCaches` 渲染缓存 / `ToolbarState`）：`ops` 编辑操作、`nav` 光标与命中、`clip` 剪贴板、`input` 输入法、`render` 块渲染，`table_render` / `menus_render` / `toolbar_render` 表格、菜单、工具栏，`attach` / `media` / `fileview` 附件与视频 |
 | `src/workspace.rs`、`src/workspace/` | 主窗口；设置、命令面板、演示、PDF 导出、写作统计 |
 | `src/convert.rs` | HTML / Markdown 导入导出（网页粘贴还原） |
-| `src/canvas/`、`src/diagram/` | 2D 场景图与绘制；Mermaid / PlantUML 解析与分层布局 |
+| `src/canvas/`、`src/diagram/` | 2D 场景图与绘制，`canvas::math` 是画板与草图共用的几何（点线距离、多边形命中、缩放手柄、对齐 / 分布）；Mermaid / PlantUML 解析与分层布局 |
 | `src/board/` | 画板 / 流程图 / 思维导图的模型与全屏编辑器 |
 | `src/sketch/` | 草图（Excalidraw 兼容）：官方 `.excalidraw` 模型、手绘渲染、导入导出与全屏编辑器 |
-| `src/sheet/` | 电子表格界面（`commands` 命令分发、`mouse` 鼠标交互、`paint` 绘制；计算由 IronCalc 完成） |
+| `src/sheet/` | 电子表格界面（`commands` 静态命令表、`mouse` 鼠标交互、`paint` 绘制；计算由 IronCalc 完成） |
 | `src/base/` | 多维表格：`model` 数据与撤销、`db` 逐行存储、`formula` / `calc` 公式与视图计算、`editor` / `chrome` 界面 |
 | `src/highlight.rs` | 代码高亮（代码块、文本框、附件预览共用） |
 | `src/webview.rs`、`src/math.rs`、`src/linkcard.rs`、`src/media.rs` | 离屏 WebView、KaTeX、网页卡片抓取（支持系统代理）、视频 |
 | `src/autotest.rs`、`src/*/script.rs` | 脚本驱动的端到端测试（`dev` feature） |
 | `vendor/` | 打了补丁的 GPUI 0.2.2 与 IronCalc 0.9.1，见 [docs/VENDOR_PATCHES.md](docs/VENDOR_PATCHES.md) |
 
-代码约 8.6 万行 Rust。主要依赖：`gpui`、`ironcalc`、`rusqlite`（内置 SQLite，含 FTS5）、`roughr`（手绘风格）、`resvg`、`pulldown-cmark`、`scraper` + `ureq`（网页卡片）、`symphonia`（音频）、`objc2-*`（系统接口）。release 二进制约 37MB。
+代码约 10.6 万行 Rust。主要依赖：`gpui`、`ironcalc`、`rusqlite`（内置 SQLite，含 FTS5）、`roughr`（手绘风格）、`resvg`、`pulldown-cmark`、`scraper` + `ureq`（网页卡片）、`symphonia`（音频）、`objc2-*`（系统接口）。release 二进制约 37MB。
 
 ## 开发
 

@@ -72,8 +72,46 @@ struct Entry {
     dirty_since: Option<Instant>,
 }
 
+/// 内存里最多缓存多少个对象（超出时淘汰最久未用、且没被编辑器持有、没有未落盘修改的）
+const CACHE_CAP: usize = 32;
+
+/// 不能淘汰的对象：有未落盘的修改，或数据还被别处（编辑器、内嵌视图）持有——
+/// 淘汰后再 `get` 会从数据库读出另一份实例，编辑器手里那份的修改就和缓存脱节了。
+fn pinned(_: &String, e: &Entry) -> bool {
+    e.dirty_since.is_some()
+        || match &e.data {
+            ObjData::Board(a) => Arc::strong_count(a) > 1,
+            ObjData::Sketch(a) => Arc::strong_count(a) > 1,
+            ObjData::Sheet(r) => Rc::strong_count(r) > 1,
+            ObjData::Base(r) => Rc::strong_count(r) > 1,
+        }
+}
+
 thread_local! {
-    static OBJS: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
+    static OBJS: RefCell<crate::lru::Lru<String, Entry>> = RefCell::new(crate::lru::Lru::with_pin(CACHE_CAP, pinned));
+}
+
+thread_local! {
+    static VER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 全局递增的版本号：对象被淘汰后重新放回缓存也不会和旧版本号撞车（预览缓存按版本号失效）。
+fn next_ver() -> u64 {
+    VER.with(|v| {
+        v.set(v.get() + 1);
+        v.get()
+    })
+}
+
+/// 从数据推出对象种类（缓存被淘汰后 `update` 重新放回时用）。
+fn kind_of(data: &ObjData) -> ObjKind {
+    match data {
+        ObjData::Board(b) if b.flow => ObjKind::Flow,
+        ObjData::Board(_) => ObjKind::Board,
+        ObjData::Sheet(_) => ObjKind::Sheet,
+        ObjData::Base(_) => ObjKind::Base,
+        ObjData::Sketch(_) => ObjKind::Sketch,
+    }
 }
 
 pub fn store() -> Option<Store> {
@@ -92,7 +130,9 @@ const EXT_MAGIC: &[u8; 8] = b"\0INKSX1\0";
 
 pub fn sheet_to_bytes(m: &UserModel) -> Vec<u8> {
     let wb = m.to_bytes();
+    // 扩展数据里的单元格图片 / 附件路径落盘为相对引用
     let ext = m.get_ext();
+    let ext = if ext.is_empty() { String::new() } else { crate::assets::json_text_out(ext) };
     if ext.is_empty() {
         return wb;
     }
@@ -109,73 +149,152 @@ pub fn sheet_from_bytes(bytes: &[u8]) -> Option<UserModel<'static>> {
         let n = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
         let wb = bytes.get(12..12 + n)?;
         let mut m = UserModel::from_bytes(wb, "en").ok()?;
-        m.load_ext(String::from_utf8_lossy(&bytes[12 + n..]).into_owned());
+        m.load_ext(crate::assets::json_text_in(&String::from_utf8_lossy(&bytes[12 + n..])));
         return Some(m);
     }
     UserModel::from_bytes(bytes, "en").ok()
 }
 
 /// 把对象交给写线程保存。画板在写线程里序列化；表格 / 多维表格元数据在这里编码（必须在界面线程）。
+/// 编码失败时写线程不写入并上报错误（不会用空内容覆盖原数据）。
 fn persist(store: &Store, id: &str, kind: ObjKind, data: &ObjData) {
+    let json_err = |e: serde_json::Error| e.to_string();
     match data {
         ObjData::Board(b) => {
             let b = b.clone();
-            store.save_object_with(id, kind.as_str(), move || serde_json::to_vec(&*b).unwrap_or_default());
+            store.save_object_with(id, kind.as_str(), move || crate::assets::encode(&*b).map_err(json_err));
         }
-        ObjData::Sheet(s) => store.save_object(id, kind.as_str(), sheet_to_bytes(&s.borrow())),
-        ObjData::Base(b) => store.save_object(id, kind.as_str(), serde_json::to_vec(&b.borrow().meta).unwrap_or_default()),
+        ObjData::Sheet(s) => store.save_object(id, kind.as_str(), Ok(sheet_to_bytes(&s.borrow()))),
+        ObjData::Base(b) => store.save_object(id, kind.as_str(), b.borrow().meta_bytes().map_err(json_err)),
         ObjData::Sketch(d) => {
             let d = d.clone();
-            store.save_object_with(id, kind.as_str(), move || serde_json::to_vec(&*d).unwrap_or_default());
+            store.save_object_with(id, kind.as_str(), move || crate::assets::encode(&*d).map_err(json_err));
         }
     }
 }
 
-fn decode(id: &str, kind: ObjKind, bytes: &[u8]) -> Option<ObjData> {
-    Some(match kind {
-        ObjKind::Base => ObjData::Base(Rc::new(RefCell::new(crate::base::db::load(id, serde_json::from_slice(bytes).ok()?)))),
-        ObjKind::Board | ObjKind::Flow => ObjData::Board(Arc::new(serde_json::from_slice(bytes).ok()?)),
-        ObjKind::Sheet => ObjData::Sheet(Rc::new(RefCell::new(sheet_from_bytes(bytes)?))),
-        ObjKind::Sketch => ObjData::Sketch(Arc::new(serde_json::from_slice(bytes).ok()?)),
+fn decode(id: &str, kind: ObjKind, bytes: &[u8]) -> Result<ObjData, String> {
+    let e = |e: serde_json::Error| e.to_string();
+    Ok(match kind {
+        ObjKind::Base => ObjData::Base(Rc::new(RefCell::new(crate::base::db::load(id, crate::assets::decode(bytes).map_err(e)?)))),
+        ObjKind::Board | ObjKind::Flow => ObjData::Board(Arc::new(crate::assets::decode(bytes).map_err(e)?)),
+        ObjKind::Sheet => ObjData::Sheet(Rc::new(RefCell::new(sheet_from_bytes(bytes).ok_or("电子表格数据无法解码")?))),
+        ObjKind::Sketch => ObjData::Sketch(Arc::new(crate::assets::decode(bytes).map_err(e)?)),
     })
 }
 
-fn default_data(kind: ObjKind) -> ObjData {
+/// 新对象 `id` 的默认内容。
+fn default_data(id: &str, kind: ObjKind) -> ObjData {
     match kind {
         ObjKind::Sheet => ObjData::Sheet(Rc::new(RefCell::new(new_sheet()))),
         ObjKind::Flow => ObjData::Board(Arc::new(BoardDoc::new(true))),
         ObjKind::Sketch => ObjData::Sketch(Arc::new(crate::sketch::SketchDoc::new())),
-        ObjKind::Board | ObjKind::Base => ObjData::Board(Arc::new(BoardDoc::new(false))),
+        ObjKind::Board => ObjData::Board(Arc::new(BoardDoc::new(false))),
+        ObjKind::Base => ObjData::Base(Rc::new(RefCell::new(new_base(id, crate::base::Base::new_default(id, crate::base::ViewKind::Grid))))),
     }
+}
+
+/// 多维表格的字段 / 记录 / 视图逐行存在 base_* 表里，新建时先整体写入。
+fn new_base(id: &str, mut b: crate::base::Base) -> crate::base::Base {
+    debug_assert_eq!(b.id, id);
+    b.persist = store().is_some();
+    b.save_all();
+    b
 }
 
 fn insert(id: &str, kind: ObjKind, data: ObjData) {
     if let Some(s) = store() {
         persist(&s, id, kind, &data);
     }
-    OBJS.with(|o| o.borrow_mut().insert(id.to_string(), Entry { kind, data, version: 1, dirty_since: None }));
+    OBJS.with(|o| o.borrow_mut().insert(id.to_string(), Entry { kind, data, version: next_ver(), dirty_since: None }));
 }
 
-/// 新建对象并立即排队落盘。未知的 `kind` 按画板处理。
-pub fn create(kind: &str, data: Option<ObjData>) -> String {
-    let kind = ObjKind::parse(kind).unwrap_or(ObjKind::Board);
+/// 新建对象并立即排队落盘。
+pub fn create(kind: ObjKind, data: Option<ObjData>) -> String {
     let id = crate::store::new_uuid();
-    let data = data.unwrap_or_else(|| default_data(kind));
+    let data = data.unwrap_or_else(|| default_data(&id, kind));
     insert(&id, kind, data);
     id
 }
 
-/// 取对象（必要时从数据库加载）。
-pub fn get(id: &str) -> Option<ObjData> {
-    let hit = OBJS.with(|o| o.borrow().get(id).map(|e| e.data.clone()));
-    if hit.is_some() {
-        return hit;
+/// 对象读不出来的原因。
+#[derive(Clone, Debug)]
+pub enum LoadError {
+    /// 没有存储（单元测试）
+    NoStore,
+    /// 数据库里没有这个对象
+    Missing,
+    /// 读数据库失败（可能是暂时的；不能当成「不存在」，否则新建的空对象会覆盖原数据）
+    Read(String),
+    /// 数据无法解码（损坏 / 来自更新版本）。原始字节已备份到 `backup`（备份失败时为 None）
+    Corrupt { reason: String, backup: Option<std::path::PathBuf> },
+}
+
+impl LoadError {
+    /// 给用户看的说明。
+    pub fn message(&self) -> String {
+        match self {
+            LoadError::NoStore => "存储未初始化".into(),
+            LoadError::Missing => "对象数据丢失".into(),
+            LoadError::Read(e) => format!("读取对象失败：{e}"),
+            LoadError::Corrupt { backup: Some(p), .. } => format!("对象数据无法解析，原始数据已备份到 {}，为避免覆盖已禁止编辑", p.display()),
+            LoadError::Corrupt { backup: None, reason } => format!("对象数据无法解析（{reason}），备份失败，为避免覆盖已禁止编辑"),
+        }
     }
-    let (kind, bytes) = store()?.load_object(id)?;
-    let kind = ObjKind::parse(&kind)?;
-    let data = decode(id, kind, &bytes)?;
-    OBJS.with(|o| o.borrow_mut().insert(id.to_string(), Entry { kind, data: data.clone(), version: 1, dirty_since: None }));
-    Some(data)
+}
+
+thread_local! {
+    /// 本次运行中解码失败的对象：只备份一次，之后直接返回同一个错误
+    static BROKEN: RefCell<HashMap<String, LoadError>> = RefCell::new(HashMap::new());
+}
+
+/// 把无法解码的对象原样备份到 `recovery/`。
+fn backup_corrupt(store: &Store, id: &str, kind: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    let dir = store.data_dir.join("recovery");
+    let path = dir.join(format!("obj-{kind}-{id}-{}.bin", crate::store::now_ms()));
+    std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)).ok().map(|_| path)
+}
+
+/// 取对象（必要时从数据库加载），区分「不存在」「读失败」「损坏」。
+pub fn load(id: &str) -> Result<ObjData, LoadError> {
+    if let Some(d) = OBJS.with(|o| o.borrow().get(id).map(|e| e.data.clone())) {
+        return Ok(d);
+    }
+    if let Some(e) = BROKEN.with(|b| b.borrow().get(id).cloned()) {
+        return Err(e);
+    }
+    let store = store().ok_or(LoadError::NoStore)?;
+    let (kind, data) = load_from(&store, id)?;
+    OBJS.with(|o| o.borrow_mut().insert(id.to_string(), Entry { kind, data: data.clone(), version: next_ver(), dirty_since: None }));
+    Ok(data)
+}
+
+/// 从数据库读取并解码（不经过缓存）。解码失败时备份原始字节、上报，并记进 `BROKEN`。
+fn load_from(store: &Store, id: &str) -> Result<(ObjKind, ObjData), LoadError> {
+    let (kind_s, bytes) = match store.load_object(id) {
+        Ok(Some(x)) => x,
+        Ok(None) => return Err(LoadError::Missing),
+        Err(e) => return Err(LoadError::Read(e.to_string())),
+    };
+    let res = match ObjKind::parse(&kind_s) {
+        Some(kind) => decode(id, kind, &bytes).map(|d| (kind, d)),
+        None => Err(format!("未知的对象类型「{kind_s}」")),
+    };
+    match res {
+        Ok(x) => Ok(x),
+        Err(reason) => {
+            let backup = backup_corrupt(store, id, &kind_s, &bytes);
+            let err = LoadError::Corrupt { reason: reason.clone(), backup };
+            store.report_error(format!("{}（{reason}）", err.message()));
+            BROKEN.with(|b| b.borrow_mut().insert(id.to_string(), err.clone()));
+            Err(err)
+        }
+    }
+}
+
+/// 取对象（必要时从数据库加载）。读不出来时返回 None；需要知道原因用 `load`。
+pub fn get(id: &str) -> Option<ObjData> {
+    load(id).ok()
 }
 
 pub fn version(id: &str) -> u64 {
@@ -199,9 +318,7 @@ pub fn board(id: &str) -> Option<Arc<BoardDoc>> {
 /// 新建多维表格（斜杠菜单「表格 / 看板 / 画册」：只是默认视图不同）。
 pub fn create_base(kind: crate::base::ViewKind) -> String {
     let id = crate::store::new_uuid();
-    let mut b = crate::base::Base::new_default(&id, kind);
-    b.persist = store().is_some();
-    b.save_all();
+    let b = new_base(&id, crate::base::Base::new_default(&id, kind));
     insert(&id, ObjKind::Base, ObjData::Base(Rc::new(RefCell::new(b))));
     id
 }
@@ -209,9 +326,7 @@ pub fn create_base(kind: crate::base::ViewKind) -> String {
 /// 按预设新建多维表格（「任务看板」「日程」）。
 pub fn create_base_preset(preset: &str) -> String {
     let id = crate::store::new_uuid();
-    let mut b = crate::base::Base::new_preset(&id, preset);
-    b.persist = store().is_some();
-    b.save_all();
+    let b = new_base(&id, crate::base::Base::new_preset(&id, preset));
     insert(&id, ObjKind::Base, ObjData::Base(Rc::new(RefCell::new(b))));
     id
 }
@@ -249,17 +364,39 @@ pub fn sheet(id: &str) -> Option<Sheet> {
 
 /// 更新对象并排队保存（电子表格只标脏，停手后再编码）。
 pub fn update(id: &str, data: ObjData) {
+    let mut cached = true;
     let kind = OBJS.with(|o| {
         let mut o = o.borrow_mut();
-        let e = o.get_mut(id)?;
+        let Some(e) = o.get_mut(id) else {
+            cached = false;
+            return None;
+        };
         e.data = data.clone();
-        e.version += 1;
+        e.version = next_ver();
         if e.kind == ObjKind::Sheet {
             e.dirty_since = Some(Instant::now());
             return None;
         }
         Some(e.kind)
     });
+    if !cached {
+        // 损坏的对象绝不能写（会覆盖备份前的原始数据）；编辑入口已拦截，这里兜底并让用户知道
+        if BROKEN.with(|b| b.borrow().contains_key(id)) {
+            if let Some(store) = store() {
+                store.report_error(format!("保存失败：对象 {id} 数据已损坏，本次修改没有保存"));
+            }
+            return;
+        }
+        // 已被缓存淘汰的对象：数据就是调用方给的最新版本，放回缓存并照常保存
+        let kind = kind_of(&data);
+        OBJS.with(|o| o.borrow_mut().insert(id.to_string(), Entry { kind, data: data.clone(), version: next_ver(), dirty_since: None }));
+        if kind == ObjKind::Sheet {
+            OBJS.with(|o| o.borrow_mut().get_mut(id).map(|e| e.dirty_since = Some(Instant::now())));
+        } else if let Some(store) = store() {
+            persist(&store, id, kind, &data);
+        }
+        return;
+    }
     if let (Some(kind), Some(store)) = (kind, store()) {
         persist(&store, id, kind, &data);
     }
@@ -286,6 +423,7 @@ pub fn flush_dirty(force: bool) {
 /// 删除对象（用完即弃的临时对象，如「以思维导图查看」生成的画板）。
 pub fn remove(id: &str) {
     OBJS.with(|o| o.borrow_mut().remove(id));
+    BROKEN.with(|b| b.borrow_mut().remove(id));
     if let Some(s) = store() {
         s.delete_object(id);
     }
@@ -314,7 +452,7 @@ pub fn duplicate(id: &str) -> Option<String> {
             return Some(new_id);
         }
     };
-    Some(create(kind.as_str(), Some(copy)))
+    Some(create(kind, Some(copy)))
 }
 
 // ───────────── 导出 ─────────────
@@ -402,7 +540,13 @@ pub fn to_html(_kind: &str, id: &str) -> String {
 
 /// 资源回收：删除未被任何文档（含回收站）、用户模板、同步块引用，且超过 7 天未修改的对象。
 pub fn gc(store: &Store) -> usize {
-    let refs = crate::store::collect_ids(&store.reference_texts());
+    let refs = match store.reference_texts() {
+        Ok(t) => crate::store::collect_ids(&t),
+        Err(e) => {
+            eprintln!("资源回收跳过：读取引用失败（{e}）");
+            return 0;
+        }
+    };
     let week = 7 * 24 * 3600 * 1000;
     let now = crate::store::now_ms();
     let mut n = 0;
@@ -416,4 +560,70 @@ pub fn gc(store: &Store) -> usize {
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(tag: &str) -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("stonebrook-obj-{tag}-{}", crate::store::new_uuid()));
+        (Store::open_in(&dir).unwrap(), dir)
+    }
+
+    #[test]
+    fn corrupt_object_is_backed_up_and_reported() {
+        let (s, dir) = temp_store("corrupt");
+        let id = crate::store::new_uuid();
+        s.save_object(&id, "board", Ok(b"{not json".to_vec()));
+        s.flush();
+        let err = load_from(&s, &id).err().expect("损坏的对象必须报错，不能当成空白画板");
+        let LoadError::Corrupt { backup: Some(p), .. } = &err else { panic!("{err:?}") };
+        assert_eq!(std::fs::read(p).unwrap(), b"{not json", "原始字节原样备份");
+        assert!(s.take_error().is_some(), "损坏要进错误通道");
+        // 原始数据没有被改动
+        assert_eq!(s.load_object(&id).unwrap().unwrap().1, b"{not json");
+        assert!(matches!(load_from(&s, &crate::store::new_uuid()), Err(LoadError::Missing)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_evicts_idle_objects_but_keeps_ones_in_use() {
+        // 没有全局存储：只测缓存本身
+        let held = sheet(&create(ObjKind::Sheet, None)).unwrap(); // 模拟编辑器持有
+        let held_id = OBJS.with(|o| o.borrow().iter_ids().into_iter().next().unwrap());
+        let mut ids: Vec<String> = (0..CACHE_CAP * 2).map(|_| create(ObjKind::Board, None)).collect();
+        // 写队列里待保存的任务也持有数据（正确地钉住）；写完后再插入一个触发淘汰
+        if let Some(s) = store() {
+            s.flush();
+        }
+        ids.push(create(ObjKind::Board, None));
+        let n = OBJS.with(|o| o.borrow().iter_ids().len());
+        assert!(n <= CACHE_CAP + 1, "缓存要有上限：{n}");
+        assert!(get(&held_id).is_some(), "被持有的对象不能淘汰");
+        assert!(get(ids.last().unwrap()).is_some(), "最近用的还在");
+        drop(held);
+    }
+
+    #[test]
+    fn gc_keeps_referenced_and_recent_objects() {
+        let (s, dir) = temp_store("gc");
+        let (old_ref, old_unref, fresh) = (crate::store::new_uuid(), crate::store::new_uuid(), crate::store::new_uuid());
+        for id in [&old_ref, &old_unref, &fresh] {
+            s.save_object(id, "board", Ok(b"{}".to_vec()));
+        }
+        s.flush();
+        let long_ago = crate::store::now_ms() - 30 * 24 * 3600 * 1000;
+        let ids = (old_ref.clone(), old_unref.clone());
+        s.write_sync(move |c| c.execute("UPDATE objects SET updated = ?1 WHERE id IN (?2, ?3)", rusqlite::params![long_ago, ids.0, ids.1]).map(|_| ()));
+        // 一篇在回收站里的文档引用了 old_ref
+        let doc = s.create(None, &crate::model::DocContent::new_empty(&format!("引用 {old_ref}")));
+        s.set_deleted(&doc, true);
+        assert_eq!(gc(&s), 1);
+        s.flush();
+        assert!(s.load_object(&old_unref).unwrap().is_none(), "超过 7 天且无引用：回收");
+        assert!(s.load_object(&old_ref).unwrap().is_some(), "回收站文档引用的不能回收");
+        assert!(s.load_object(&fresh).unwrap().is_some(), "不足 7 天的不能回收");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

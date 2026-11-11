@@ -95,7 +95,7 @@ pub(crate) trait ImgHost: Sized + 'static {
 
 impl ImgHost for Editor {
     fn img_views(&mut self) -> &mut HashMap<u64, ImgView> {
-        &mut self.img_views
+        &mut self.sess.img_views
     }
 }
 

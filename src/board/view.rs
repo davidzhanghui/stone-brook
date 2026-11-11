@@ -661,8 +661,7 @@ impl BoardEditor {
     }
 
     pub(super) fn handles(r: Rect) -> [Pt; 8] {
-        let (x0, y0, x1, y1, cx, cy) = (r.x, r.y, r.right(), r.bottom(), r.center().x, r.center().y);
-        [pt(x0, y0), pt(cx, y0), pt(x1, y0), pt(x1, cy), pt(x1, y1), pt(cx, y1), pt(x0, y1), pt(x0, cy)]
+        crate::canvas::math::handles8(&crate::canvas::math::corners(r.x, r.y, r.right(), r.bottom()))
     }
 
     pub(super) fn single(&self) -> Option<&El> {
@@ -1198,15 +1197,7 @@ impl BoardEditor {
     }
 }
 
-pub(super) fn dist_seg(p: Pt, a: Pt, b: Pt) -> f32 {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let l2 = dx * dx + dy * dy;
-    if l2 < 1e-6 {
-        return p.dist(a);
-    }
-    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0., 1.);
-    p.dist(pt(a.x + t * dx, a.y + t * dy))
-}
+pub(super) use crate::canvas::math::dist_seg;
 
 impl Render for BoardEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

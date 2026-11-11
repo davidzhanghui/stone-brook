@@ -3,6 +3,7 @@
 use super::model::*;
 use super::view::*;
 use crate::canvas::geom::estimate_width;
+use crate::canvas::math;
 use crate::canvas::{rect, Col, Rect, ShapeKind};
 use crate::text_area::{TextArea, TextAreaEvent, TextStyle};
 use crate::theme::Theme;
@@ -704,14 +705,17 @@ impl BoardEditor {
             if e.is_connector() || e.locked || matches!(e.kind, ElKind::Pen { .. }) {
                 return;
             }
-            match how {
-                "left" => e.x = b.x,
-                "hcenter" => e.x = b.center().x - e.w / 2.,
-                "right" => e.x = b.right() - e.w,
-                "top" => e.y = b.y,
-                "vcenter" => e.y = b.center().y - e.h / 2.,
-                _ => e.y = b.bottom() - e.h,
-            }
+            let how = match how {
+                "left" => math::Align::Left,
+                "hcenter" => math::Align::HCenter,
+                "right" => math::Align::Right,
+                "top" => math::Align::Top,
+                "vcenter" => math::Align::VCenter,
+                _ => math::Align::Bottom,
+            };
+            let (dx, dy) = math::align_delta(how, (b.x, b.y, b.right(), b.bottom()), (e.x, e.y, e.x + e.w, e.y + e.h));
+            e.x += dx;
+            e.y += dy;
         });
     }
 
@@ -728,21 +732,16 @@ impl BoardEditor {
             return;
         }
         items.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let start = items[0].1;
-        let end = items.last().map(|i| i.1 + i.2).unwrap();
-        let total: f32 = items.iter().map(|i| i.2).sum();
-        let gap = (end - start - total) / (items.len() - 1) as f32;
+        let spans: Vec<(f32, f32)> = items.iter().map(|i| (i.1, i.2)).collect();
         self.snapshot();
-        let mut cur = start;
-        for (id, _, size) in items {
+        for ((id, _, _), at) in items.into_iter().zip(math::distribute(&spans)) {
             if let Some(i) = self.doc.index(id) {
                 if horizontal {
-                    self.doc.els[i].x = cur;
+                    self.doc.els[i].x = at;
                 } else {
-                    self.doc.els[i].y = cur;
+                    self.doc.els[i].y = at;
                 }
             }
-            cur += size + gap;
         }
         self.commit(cx);
     }

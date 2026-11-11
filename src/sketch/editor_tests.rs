@@ -16,7 +16,7 @@ fn rect_drag(ed: &mut SketchEditor, a: (f64, f64), b: (f64, f64), window: &mut g
 #[gpui::test]
 fn draw_bind_move_undo_text(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let oid = id.clone();
     let win = cx.add_window(move |_, cx| SketchEditor::new(oid.clone(), cx));
     win.update(cx, |ed, window, cx| {
@@ -91,7 +91,7 @@ fn draw_bind_move_undo_text(cx: &mut TestAppContext) {
 #[gpui::test]
 fn multipoint_line_resize_group_erase(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     win.update(cx, |ed, window, cx| {
         // 逐点画线：单击起点、单击拐点、双击终点
@@ -154,7 +154,7 @@ fn multipoint_line_resize_group_erase(cx: &mut TestAppContext) {
 #[gpui::test]
 fn sticky_bend_elbow_lasso_bucket(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     win.update(cx, |ed, window, cx| {
         // 便签：单击放一张 250×250，马上进入写字；字多了先缩字号再长高
@@ -249,7 +249,7 @@ fn sticky_bend_elbow_lasso_bucket(cx: &mut TestAppContext) {
 #[gpui::test]
 fn multipoint_four_clicks(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     win.update(cx, |ed, window, cx| {
         ed.tool = Tool::Line;
@@ -266,7 +266,7 @@ fn multipoint_four_clicks(cx: &mut TestAppContext) {
 #[gpui::test]
 fn crop_image_keeps_scale(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     let logo = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo-256.png").to_string();
     win.update(cx, |ed, window, cx| {
@@ -305,7 +305,7 @@ fn eyedropper_keeps_picker_open_and_samples_like_pixels(cx: &mut TestAppContext)
     use super::model::TRANSPARENT;
     use super::view::{PickTarget, Popover};
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     win.update(cx, |ed, window, cx| {
         rect_drag(ed, (0., 0.), (100., 60.), window, cx);
@@ -344,7 +344,7 @@ fn eyedropper_keeps_picker_open_and_samples_like_pixels(cx: &mut TestAppContext)
 #[gpui::test]
 fn arrow_start_snaps_to_outline_while_dragging(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let win = cx.add_window(move |_, cx| SketchEditor::new(id.clone(), cx));
     win.update(cx, |ed, window, cx| {
         rect_drag(ed, (0., 0.), (100., 60.), window, cx);
@@ -379,7 +379,7 @@ fn arrow_start_snaps_to_outline_while_dragging(cx: &mut TestAppContext) {
 #[gpui::test]
 fn transparent_shape_drag_from_box_and_element_link(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let oid = id.clone();
     let win = cx.add_window(move |_, cx| SketchEditor::new(oid.clone(), cx));
     win.update(cx, |ed, window, cx| {
@@ -428,7 +428,7 @@ fn transparent_shape_drag_from_box_and_element_link(cx: &mut TestAppContext) {
 #[gpui::test]
 fn view_mode_is_read_only(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
-    let id = cx.update(|_| crate::objects::create("sketch", None));
+    let id = cx.update(|_| crate::objects::create(crate::objects::ObjKind::Sketch, None));
     let oid = id.clone();
     let win = cx.add_window(move |_, cx| SketchEditor::new(oid.clone(), cx));
     win.update(cx, |ed, window, cx| {

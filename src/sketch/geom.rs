@@ -42,6 +42,19 @@ impl V {
     }
 }
 
+impl crate::canvas::math::P2 for V {
+    type S = f64;
+    fn x(&self) -> f64 {
+        self.x
+    }
+    fn y(&self) -> f64 {
+        self.y
+    }
+    fn mk(x: f64, y: f64) -> Self {
+        v(x, y)
+    }
+}
+
 /// 轴对齐矩形
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct R {
@@ -147,23 +160,7 @@ pub fn bounds_of<'a>(els: impl IntoIterator<Item = &'a Element>) -> Option<R> {
     els.into_iter().map(bounds).reduce(|a, b| a.union(&b))
 }
 
-fn dist_seg(p: V, a: V, b: V) -> f64 {
-    let ab = b.sub(a);
-    let l2 = ab.x * ab.x + ab.y * ab.y;
-    if l2 < 1e-9 {
-        return p.dist(a);
-    }
-    let t = ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / l2;
-    let t = t.clamp(0., 1.);
-    p.dist(a.add(ab.scale(t)))
-}
-
-pub fn dist_polyline(p: V, pts: &[V]) -> f64 {
-    if pts.len() == 1 {
-        return p.dist(pts[0]);
-    }
-    pts.windows(2).map(|w| dist_seg(p, w[0], w[1])).fold(f64::MAX, f64::min)
-}
+pub use crate::canvas::math::{dist_polyline, inside_poly};
 
 /// 曲线（官方 roundness 线）用 Catmull-Rom 打平，命中测试与绑定都用它。
 pub fn curve_points(pts: &[V], round: bool) -> Vec<V> {
@@ -242,20 +239,6 @@ pub fn hit(e: &Element, p: V, tol: f64) -> bool {
             }
         }
     }
-}
-
-pub fn inside_poly(p: V, poly: &[V]) -> bool {
-    let mut inside = false;
-    let n = poly.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        let (a, b) = (poly[i], poly[j]);
-        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y + 1e-12) + a.x {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
 }
 
 // ───────────── 绑定 ─────────────
@@ -749,20 +732,7 @@ pub fn layout_bound_text(doc: &mut SketchDoc, container: &str) {
 }
 
 pub fn polyline_mid(pts: &[V]) -> V {
-    if pts.is_empty() {
-        return V::default();
-    }
-    let total: f64 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
-    let mut acc = 0.;
-    for w in pts.windows(2) {
-        let l = w[0].dist(w[1]);
-        if acc + l >= total / 2. && l > 0. {
-            let t = (total / 2. - acc) / l;
-            return w[0].add(w[1].sub(w[0]).scale(t));
-        }
-        acc += l;
-    }
-    pts[0]
+    crate::canvas::math::polyline_mid(pts).unwrap_or_default()
 }
 
 /// 便签排版（官方 `getStickyNoteLayout`）：字号从用户设定（baseFontSize）往下缩到 16，

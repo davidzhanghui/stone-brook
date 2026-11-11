@@ -15,17 +15,17 @@ pub const READ_ONLY_HINT: &str = "当前为阅读模式，按 ⌥⌘R 或点顶�
 
 impl Editor {
     pub fn is_read_only(&self) -> bool {
-        self.read_only
+        self.sess.read_only
     }
 
     pub fn set_read_only(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.read_only == on {
+        if self.sess.read_only == on {
             return;
         }
-        self.read_only = on;
-        self.ro_doc = on.then(|| self.content.blocks.clone());
+        self.sess.read_only = on;
+        self.sess.ro_doc = on.then(|| self.content.blocks.clone());
         self.break_coalescing();
-        self.marked = None;
+        self.core.marked = None;
         self.pop.slash = None;
         self.pop.block_menu = None;
         self.pop.lang_menu = None;
@@ -37,15 +37,15 @@ impl Editor {
 
     /// 阅读模式下有修改漏进来：回滚到快照并提示。返回 true 表示已拦截（调用方不再走保存流程）。
     pub(super) fn reject_read_only_edit(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.read_only {
+        if !self.sess.read_only {
             return false;
         }
-        let Some(snap) = self.ro_doc.clone() else { return true };
+        let Some(snap) = self.sess.ro_doc.clone() else { return true };
         let same = snap.len() == self.content.blocks.len() && snap.iter().zip(&self.content.blocks).all(|(a, b)| Arc::ptr_eq(a, b));
         if !same {
             self.replace_all(snap);
-            self.anchor = self.clamp(self.anchor);
-            self.head = self.clamp(self.head);
+            self.core.anchor = self.clamp(self.core.anchor);
+            self.core.head = self.clamp(self.core.head);
             cx.emit(EditorEvent::Toast(READ_ONLY_HINT.into()));
         }
         cx.notify();

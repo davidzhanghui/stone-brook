@@ -2,7 +2,6 @@
 
 use gpui::{App, AsyncApp};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +22,7 @@ pub enum CardState {
 }
 
 thread_local! {
-    static CARDS: RefCell<HashMap<String, CardState>> = RefCell::new(HashMap::new());
+    static CARDS: RefCell<crate::lru::Lru<String, CardState>> = RefCell::new(crate::lru::Lru::new(512));
 }
 
 fn store() -> Option<&'static crate::store::Store> {
@@ -31,8 +30,13 @@ fn store() -> Option<&'static crate::store::Store> {
 }
 
 pub fn domain(url: &str) -> String {
-    let s = url.split("://").nth(1).unwrap_or(url);
-    s.split('/').next().unwrap_or(s).trim_start_matches("www.").to_string()
+    match url::Url::parse(url) {
+        Ok(u) => u.host_str().unwrap_or("").trim_start_matches("www.").to_string(),
+        Err(_) => {
+            let s = url.split("://").nth(1).unwrap_or(url);
+            s.split('/').next().unwrap_or(s).trim_start_matches("www.").to_string()
+        }
+    }
 }
 
 fn from_db(url: &str) -> Option<CardState> {
@@ -148,6 +152,17 @@ fn agent() -> ureq::Agent {
         .new_agent()
 }
 
+/// 大文件下载用的连接（应用更新）：只限制连接与首包超时，不限制总时长；走与网页卡片相同的代理设置。
+pub(crate) fn agent_with_timeout(secs: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .proxy(proxy())
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(secs)))
+        .user_agent(concat!("Stonebrook/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .new_agent()
+}
+
 fn get_bytes(url: &str, limit: u64) -> Option<(Vec<u8>, String)> {
     let mut resp = agent().get(url).call().ok()?;
     let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
@@ -169,24 +184,95 @@ fn decode_html(bytes: &[u8], ctype: &str) -> String {
 }
 
 fn absolutize(base: &str, href: &str) -> String {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return href.to_string();
+    url::Url::parse(base).and_then(|b| b.join(href)).map(|u| u.to_string()).unwrap_or_else(|_| href.to_string())
+}
+
+/// 是否是可以访问的公网 http(s) 地址。用于页面里「间接」引用的资源（粘贴内容中的远程图片、网页的封面与图标）：
+/// 这些地址不是用户自己输入的，不能让一段粘贴内容驱使应用去访问回环 / 内网 / 链路本地地址。
+/// 域名会先解析，任何一个解析结果落在非公网段都拒绝。
+pub fn is_public_http(u: &str) -> bool {
+    let Ok(url) = url::Url::parse(u) else { return false };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
     }
-    let scheme = if base.starts_with("https") { "https" } else { "http" };
-    if let Some(rest) = href.strip_prefix("//") {
-        return format!("{scheme}://{rest}");
-    }
-    let origin = format!("{scheme}://{}", base.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or(""));
-    if href.starts_with('/') {
-        format!("{origin}{href}")
-    } else {
-        let dir = base.rsplit_once('/').map(|x| x.0).unwrap_or(&origin);
-        format!("{dir}/{href}")
+    let port = url.port_or_known_default().unwrap_or(80);
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => public_ip(std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => public_ip(std::net::IpAddr::V6(ip)),
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            if d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local") || d.ends_with(".internal") {
+                return false;
+            }
+            use std::net::ToSocketAddrs;
+            match (d.as_str(), port).to_socket_addrs() {
+                Ok(addrs) => {
+                    let addrs: Vec<_> = addrs.collect();
+                    !addrs.is_empty() && addrs.iter().all(|a| public_ip(a.ip()))
+                }
+                Err(_) => false,
+            }
+        }
+        None => false,
     }
 }
 
+fn public_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            !(v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64/10 运营商 NAT
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18/15 基准测试
+                || o[0] >= 224)
+        }
+        IpAddr::V6(v) => {
+            if let Some(v4) = v.to_ipv4_mapped() {
+                return public_ip(IpAddr::V4(v4));
+            }
+            let s = v.segments();
+            !(v.is_loopback() || v.is_unspecified() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xff00) == 0xff00)
+        }
+    }
+}
+
+/// 只访问公网地址的下载：重定向逐跳检查（不交给 HTTP 库自动跟随，否则会被 302 带到内网）。
+fn get_public_bytes(url: &str, limit: u64) -> Option<(Vec<u8>, String)> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(proxy())
+        .timeout_global(Some(Duration::from_secs(8)))
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+        .build()
+        .new_agent();
+    let mut cur = url.to_string();
+    for _ in 0..5 {
+        if !is_public_http(&cur) {
+            return None;
+        }
+        let mut resp = agent.get(&cur).call().ok()?;
+        if resp.status().is_redirection() {
+            let loc = resp.headers().get("location").and_then(|v| v.to_str().ok())?.to_string();
+            cur = absolutize(&cur, &loc);
+            continue;
+        }
+        let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
+        let bytes = resp.body_mut().with_config().limit(limit).read_to_vec().ok()?;
+        return Some((bytes, ctype));
+    }
+    None
+}
+
 fn download(url: &str, dir: &std::path::Path, prefix: &str) -> String {
-    let Some((bytes, ctype)) = get_bytes(url, 5 * 1024 * 1024) else { return String::new() };
+    let Some((bytes, ctype)) = get_public_bytes(url, 5 * 1024 * 1024) else { return String::new() };
     if bytes.len() < 64 {
         return String::new();
     }
@@ -277,4 +363,35 @@ pub fn fetch(url: &str, assets: &std::path::Path) -> Option<Card> {
 pub fn download_image(url: &str, assets: &std::path::Path) -> Option<String> {
     let p = download(url, assets, "img");
     (!p.is_empty()).then_some(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{absolutize, is_public_http};
+
+    #[test]
+    fn private_addresses_are_rejected() {
+        for u in [
+            "http://127.0.0.1/a.png",
+            "http://localhost:8080/",
+            "http://10.0.0.5/x",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "file:///etc/passwd",
+            "ftp://example.com/",
+        ] {
+            assert!(!is_public_http(u), "{u}");
+        }
+        assert!(is_public_http("http://93.184.216.34/x.png"));
+    }
+
+    #[test]
+    fn absolutize_handles_relative_forms() {
+        assert_eq!(absolutize("https://a.com/x/y.html", "/i.png"), "https://a.com/i.png");
+        assert_eq!(absolutize("https://a.com/x/y.html", "i.png"), "https://a.com/x/i.png");
+        assert_eq!(absolutize("https://a.com/x/", "//cdn.b.com/i.png"), "https://cdn.b.com/i.png");
+    }
 }

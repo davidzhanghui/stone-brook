@@ -81,7 +81,7 @@ impl Editor {
         let (vertical, same, hide) = (*vertical, *same_side, *hide);
         let id = blk.id as usize;
         let selected = focused && self.block_selected(ix);
-        let in_block = focused && self.head.block == ix;
+        let in_block = focused && self.core.head.block == ix;
         let avail = self.avail_w.get() - 2.;
 
         let body = if vertical {
@@ -229,7 +229,7 @@ impl Editor {
 
     /// 一个可编辑字段：编辑中描蓝框。
     fn tl_field(&self, ix: usize, cell: usize, rt: &crate::model::RichText, focused: bool, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let editing = focused && self.head.slot() == (ix, cell);
+        let editing = focused && self.core.head.slot() == (ix, cell);
         let (size, line_h, weight, color, ph) = match cell % TL_SLOTS {
             0 => (14., 22., FontWeight::SEMIBOLD, t.text, "输入标题"),
             1 => (12., 18., FontWeight::NORMAL, t.text_secondary, "输入详情"),
@@ -558,8 +558,8 @@ impl Editor {
         if let BlockKind::Timeline { items, .. } = &mut self.block_mut(ix).kind {
             items.insert(at.min(items.len()), TimelineItem::default());
         }
-        self.head = Pos::new(ix, at * TL_SLOTS + first_visible(hide), 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(ix, at * TL_SLOTS + first_visible(hide), 0);
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -574,13 +574,13 @@ impl Editor {
         }
         if empty {
             self.remove_blocks(ix..ix + 1);
-            self.head = self.clamp(Pos::new(ix, 0, 0));
+            self.core.head = self.clamp(Pos::new(ix, 0, 0));
         } else {
             let hide = self.tl_hide(ix);
             let k = k.min(self.content.blocks[ix].slot_count() / TL_SLOTS - 1);
-            self.head = Pos::new(ix, k * TL_SLOTS + first_visible(hide), 0);
+            self.core.head = Pos::new(ix, k * TL_SLOTS + first_visible(hide), 0);
         }
-        self.anchor = self.head;
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -600,7 +600,7 @@ impl Editor {
             cx,
         );
         // 光标所在字段被隐藏：挪到同节点第一个可见字段
-        for p in [&mut self.head, &mut self.anchor] {
+        for p in [&mut self.core.head, &mut self.core.anchor] {
             if p.block == ix && hide & (1 << (p.cell % TL_SLOTS)) != 0 {
                 *p = Pos::new(ix, p.cell / TL_SLOTS * TL_SLOTS + first_visible(hide), 0);
             }

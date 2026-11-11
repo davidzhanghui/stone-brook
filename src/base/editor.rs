@@ -1509,14 +1509,7 @@ impl BaseEditor {
 
 /// 发 macOS 系统通知（自动化的「发送通知」动作）。
 pub fn notify_system(title: &str, body: &str) {
-    if std::env::var_os("STONEBROOK_SCRIPT").is_some() {
-        return;
-    }
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title));
-    std::thread::spawn(move || {
-        std::process::Command::new("osascript").arg("-e").arg(script).output().ok();
-    });
+    crate::sysui::notify(title, body);
 }
 
 /// 把外部文件拷进资源目录 `assets`（图片额外生成 480px 缩略图；可在后台线程调用）。
@@ -1525,7 +1518,7 @@ pub fn import_file(assets: &std::path::Path, src: &std::path::Path) -> Option<At
     let dir = assets.join(&crate::store::new_uuid()[..8]);
     std::fs::create_dir_all(&dir).ok()?;
     let dst = dir.join(&name);
-    std::fs::copy(src, &dst).ok()?;
+    crate::assets::import_copy(src, &dst).ok()?;
     let size = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
     let mut a = Attachment { path: dst.to_string_lossy().to_string(), name, size, thumb: String::new() };
     if a.is_image() {

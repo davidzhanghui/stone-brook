@@ -209,8 +209,8 @@ fn check_pos(ed: &Editor, p: Pos, name: &str) -> Result<(), String> {
 
 fn check(ed: &Editor) -> Result<(), String> {
     let blocks = &ed.content.blocks;
-    if ed.is_hidden(ed.head.block) {
-        return Err(format!("光标停在被折叠 / 聚焦隐藏的块 {} 上", ed.head.block));
+    if ed.is_hidden(ed.core.head.block) {
+        return Err(format!("光标停在被折叠 / 聚焦隐藏的块 {} 上", ed.core.head.block));
     }
     if blocks.len() < 2 {
         return Err(format!("只剩 {} 个块", blocks.len()));
@@ -228,8 +228,8 @@ fn check(ed: &Editor) -> Result<(), String> {
         }
         check_block(b, i)?;
     }
-    check_pos(ed, ed.anchor, "anchor")?;
-    check_pos(ed, ed.head, "head")?;
+    check_pos(ed, ed.core.anchor, "anchor")?;
+    check_pos(ed, ed.core.head, "head")?;
     Ok(())
 }
 
@@ -295,8 +295,8 @@ fn step(ed: &mut Editor, rng: &mut Rng, window: &mut Window, cx: &mut gpui::Cont
         let p = random_pos(ed, rng);
         ed.set_cursor(p, true, cx);
     }
-    let sel = format!("[{:?}→{:?}] ", ed.anchor, ed.head);
-    if ed.read_only {
+    let sel = format!("[{:?}→{:?}] ", ed.core.anchor, ed.core.head);
+    if ed.sess.read_only {
         return sel + &read_only_step(ed, rng, window, cx);
     }
     let n = ed.content.blocks.len();
@@ -482,7 +482,7 @@ fn step(ed: &mut Editor, rng: &mut Rng, window: &mut Window, cx: &mut gpui::Cont
         }
         39 => {
             // 阅读模式：大约一半时间开着，验证所有操作都改不了文档
-            let on = !ed.read_only;
+            let on = !ed.sess.read_only;
             ed.set_read_only(on, cx);
             format!("{}阅读模式", if on { "进入" } else { "退出" })
         }
@@ -617,18 +617,18 @@ fn run_seed(seed: u64, steps: usize, store: &crate::store::Store, cx: &mut TestA
         }
         for _ in 0..steps {
             let before = ed.content.to_json();
-            let was_read_only = ed.read_only;
+            let was_read_only = ed.sess.read_only;
             let op = step(ed, &mut rng, window, cx);
             let undo_redo = op.ends_with("撤销") || op.ends_with("重做");
             log.push(op);
             if let Err(e) = check(ed).and_then(|_| round_trip(ed)) {
                 fail(&log, ed, e);
             }
-            if was_read_only && ed.read_only && norm(&ed.content.to_json()) != norm(&before) {
+            if was_read_only && ed.sess.read_only && norm(&ed.content.to_json()) != norm(&before) {
                 fail(&log, ed, format!("阅读模式下文档被改了：\n{}", diff(&before, &ed.content.to_json())));
             }
             // 改了文档就必须记过撤销点（checkpoint 会清空重做栈），否则这一步撤销不了，重做还会丢掉它
-            if !undo_redo && !ed.redo_stack.is_empty() && norm(&ed.content.to_json()) != norm(&before) {
+            if !undo_redo && !ed.core.redo_stack.is_empty() && norm(&ed.content.to_json()) != norm(&before) {
                 fail(&log, ed, format!("这一步改了文档却没有记录撤销点：\n{}", diff(&before, &ed.content.to_json())));
             }
         }
@@ -637,9 +637,9 @@ fn run_seed(seed: u64, steps: usize, store: &crate::store::Store, cx: &mut TestA
         let end = ed.content.to_json();
         ed.break_coalescing();
         // 最后几步之前若做过撤销且之后没改文档，重做栈里会合法地留着旧记录；清掉它，重做到头才应等于最终文档
-        ed.redo_stack.clear();
+        ed.core.redo_stack.clear();
         let mut guard = 0;
-        while !ed.undo_stack.is_empty() && guard < 1000 {
+        while !ed.core.undo_stack.is_empty() && guard < 1000 {
             ed.undo(&Undo, window, cx);
             guard += 1;
             if let Err(e) = check(ed) {
@@ -649,7 +649,7 @@ fn run_seed(seed: u64, steps: usize, store: &crate::store::Store, cx: &mut TestA
         if norm(&ed.content.to_json()) != norm(&start) {
             fail(&log, ed, format!("撤销到底没有回到种子文档：\n{}", diff(&start, &ed.content.to_json())));
         }
-        while !ed.redo_stack.is_empty() {
+        while !ed.core.redo_stack.is_empty() {
             ed.redo(&Redo, window, cx);
             if let Err(e) = check(ed) {
                 fail(&log, ed, format!("重做后：{e}"));

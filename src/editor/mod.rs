@@ -375,6 +375,99 @@ pub struct Popups {
     pub mention: Option<links::MentionMenu>,
 }
 
+/// 编辑核心：选区、输入法、撤销 / 重做。切换文档时整体重置。
+#[derive(Default)]
+pub struct EditCore {
+    pub anchor: Pos,
+    pub head: Pos,
+    pub marked: Option<Range<usize>>,
+    pub goal_x: Option<Pixels>,
+    pub pending_marks: Option<Marks>,
+    undo_stack: std::collections::VecDeque<Snapshot>,
+    redo_stack: Vec<Snapshot>,
+    pub last_edit: Option<(EditKind, Instant)>,
+    pub selecting: bool,
+}
+
+/// 渲染期缓存：只影响性能，丢掉会在下一帧重建。
+#[derive(Default)]
+pub struct RenderCaches {
+    pub numbers: (u64, Vec<usize>),
+    pub stats: (u64, usize),
+    pub frame_times: VecDeque<f32>,
+    pub render_start: Option<Instant>,
+    pub image_sizes: RefCell<HashMap<String, Option<(u32, u32)>>>,
+    /// 表格几何缓存（按块 id）
+    pub table_geo: Rc<RefCell<HashMap<u64, TableGeo>>>,
+    pub diagram_cache: RefCell<HashMap<u64, Result<Arc<crate::canvas::Scene>, crate::diagram::DiagramError>>>,
+    pub diagram_good: RefCell<HashMap<u64, Arc<crate::canvas::Scene>>>,
+    /// 文本绘图源码区的滚动状态（按块 id）
+    pub diagram_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
+    /// 不换行空格宽度 / 字号（每帧测量）
+    pub nbsp_w: std::cell::Cell<f32>,
+    pub nbsp_measured: bool,
+    pub reveal_pending: std::cell::Cell<u8>,
+    /// 隐藏块掩码缓存：((版本, 聚焦根), 掩码)
+    pub fold_cache: RefCell<Option<((u64, Option<u64>), Rc<Vec<bool>>)>>,
+}
+
+/// 当前文档的界面会话状态（浮层、预览、拖动、阅读模式…），指向块 id / 下标，切换文档时整体重置。
+#[derive(Default)]
+pub struct DocSession {
+    pub html_live: Option<u64>,
+    pub video_full: Option<u64>,
+    /// 「视频或文件」块的全屏预览（顶栏 退出 / 文件名 / 下载 + 下方内容）
+    pub file_full: Option<u64>,
+    /// 文件块里图片的查看状态（缩放 / 旋转 / 平移），不写进文档
+    pub img_views: HashMap<u64, imgview::ImgView>,
+    /// 鼠标悬停的文件块（显示视图切换工具栏）
+    pub file_hover: Option<u64>,
+    pub diagram_drag: Option<DiagramDrag>,
+    pub image_drag: Option<ImageDrag>,
+    /// 图片裁剪模式
+    pub image_crop: Option<CropEdit>,
+    /// 全屏查看大图
+    pub image_preview: Option<String>,
+    /// 评论输入浮层
+    pub comment_input: Option<CommentInput>,
+    /// 正在回复的块
+    pub comment_open: Option<usize>,
+    /// 悬停工具栏当前显示的按钮块 id + 延迟隐藏序号（鼠标从按钮移向工具栏途中不消失）
+    pub button_bar: Option<u64>,
+    /// 正在拖动的表格列边线
+    pub table_col_drag: Option<TableColDrag>,
+    /// 行列边界上的「插入」提示
+    pub table_insert_hover: Option<TableInsertHover>,
+    /// 弹框查看大图的绘图块 id
+    pub diagram_preview: Option<u64>,
+    /// 大图弹框的缩放倍数（相对「适应窗口」）
+    pub diagram_preview_zoom: f32,
+    /// 在预览图上按下鼠标的 (块, 位置)：抬起时没移动就算单击（弹框预览）
+    pub diagram_click: Option<(usize, Point<Pixels>)>,
+    pub url_paste: Option<urlpaste::UrlPaste>,
+    /// 阅读模式：不接受修改（见 reading.rs）
+    pub read_only: bool,
+    /// 进入阅读模式时的文档快照，漏进来的修改回滚到它
+    pub ro_doc: Option<Vec<Arc<Block>>>,
+    /// 正在编辑的行内公式 (块, 槽, 偏移)
+    pub inline_math_at: Option<(usize, usize, usize)>,
+    /// 聚焦模式的根块 id（见 fold.rs）
+    pub focus_root: Option<u64>,
+}
+
+/// 格式工具栏的悬停 / 下拉状态，跨文档保留。
+#[derive(Default)]
+pub struct ToolbarState {
+    /// 「其他标题」子项是否展开
+    pub tb_more_heading: bool,
+    /// 悬停展开的工具栏下拉：鼠标所在的悬停区（触发按钮 / 面板）个数，移出后延时收起，
+    /// 到点时仍为 0 才收起（同一次移动里「进面板」「出按钮」的先后不固定，不能只看最后一个事件）
+    pub tb_hover_count: usize,
+    pub tb_hover_epoch: usize,
+    /// 上次使用的 (文字颜色, 背景色)，点工具栏「A」直接套用
+    pub last_color: (Option<u8>, Option<u8>),
+}
+
 pub struct Editor {
     pub doc_id: String,
     /// `@` 菜单可选的文档（工作区设置）
@@ -386,117 +479,46 @@ pub struct Editor {
     pub store: Store,
     pub focus: FocusHandle,
     pub list: ListState,
-    pub anchor: Pos,
-    pub head: Pos,
-    pub marked: Option<Range<usize>>,
-    goal_x: Option<Pixels>,
-    pending_marks: Option<Marks>,
-    undo_stack: std::collections::VecDeque<Snapshot>,
-    redo_stack: Vec<Snapshot>,
-    last_edit: Option<(EditKind, Instant)>,
     pub frame: Rc<RefCell<FrameInfo>>,
-    selecting: bool,
     pub cursor_visible: bool,
     last_activity: Instant,
-    numbers: (u64, Vec<usize>),
-    stats: (u64, usize),
     pub find: Option<FindState>,
     pub show_perf: bool,
-    /// 「其他标题」子项是否展开
-    pub tb_more_heading: bool,
-    /// 悬停展开的工具栏下拉：鼠标所在的悬停区（触发按钮 / 面板）个数，移出后延时收起，
-    /// 到点时仍为 0 才收起（同一次移动里「进面板」「出按钮」的先后不固定，不能只看最后一个事件）
-    pub tb_hover_count: usize,
-    pub tb_hover_epoch: usize,
-    /// 上次使用的 (文字颜色, 背景色)，点工具栏「A」直接套用
-    pub last_color: (Option<u8>, Option<u8>),
-    pub frame_times: VecDeque<f32>,
-    render_start: Option<Instant>,
     dirty: bool,
     save_task: Option<Task<()>>,
     _blink: Task<()>,
-    image_sizes: RefCell<HashMap<String, Option<(u32, u32)>>>,
     pub typed_today: usize,
     /// 已弹过结束提醒的倒计时（块 id）
     countdown_fired: std::collections::HashSet<u64>,
-    pub html_live: Option<u64>,
-    pub video_full: Option<u64>,
     /// 文档里直接可编辑的电子表格（对象 id → 内嵌表格视图）
     pub live_sheets: std::collections::HashMap<String, (Entity<crate::sheet::SheetEditor>, Subscription)>,
     /// 文档里内嵌的可交互多维表格（R12）
     pub live_bases: std::collections::HashMap<String, (Entity<crate::base::editor::BaseEditor>, Subscription)>,
-    /// 「视频或文件」块的全屏预览（顶栏 退出 / 文件名 / 下载 + 下方内容）
-    pub file_full: Option<u64>,
-    /// 文件块里图片的查看状态（缩放 / 旋转 / 平移），不写进文档
-    pub img_views: HashMap<u64, imgview::ImgView>,
     /// 「视频或文件」后台拷贝中的文件：目标路径 → 进度（千分比）
     pub uploads: HashMap<String, Arc<std::sync::atomic::AtomicU32>>,
-    /// 鼠标悬停的文件块（显示视图切换工具栏）
-    pub file_hover: Option<u64>,
     pub file_hover_epoch: u64,
-    pub diagram_drag: Option<DiagramDrag>,
-    pub image_drag: Option<ImageDrag>,
-    /// 图片裁剪模式
-    pub image_crop: Option<CropEdit>,
-    /// 全屏查看大图
-    pub image_preview: Option<String>,
     /// 正文实际可用宽度（窗口窄于 content_w 时会更小），跨帧保留
     pub avail_w: Rc<std::cell::Cell<f32>>,
-    /// 当前正在显示工具栏的图片块
-    pub image_sel: Option<usize>,
     /// 当前文档的评论（缓存）
     pub comments: Vec<crate::store::Comment>,
-    /// 评论输入浮层
-    pub comment_input: Option<CommentInput>,
-    /// 正在回复的块
-    pub comment_open: Option<usize>,
     /// 行列选择器的延迟关闭序号（鼠标在菜单项与浮层之间移动时避免误关）
     pub table_hover_epoch: u64,
-    /// 悬停工具栏当前显示的按钮块 id + 延迟隐藏序号（鼠标从按钮移向工具栏途中不消失）
-    pub button_bar: Option<u64>,
     pub button_bar_epoch: u64,
     /// 斜杠菜单本帧的锚点（未 snap）；菜单 bounds 尚未测到时用它兜底
     pub slash_at: Point<Pixels>,
-    /// 表格几何缓存（按块 id）
-    pub table_geo: Rc<RefCell<HashMap<u64, TableGeo>>>,
-    /// 正在拖动的表格列边线
-    pub table_col_drag: Option<TableColDrag>,
-    /// 行列边界上的「插入」提示
-    pub table_insert_hover: Option<TableInsertHover>,
-    pub diagram_cache: RefCell<HashMap<u64, Result<Arc<crate::canvas::Scene>, crate::diagram::DiagramError>>>,
-    pub diagram_good: RefCell<HashMap<u64, Arc<crate::canvas::Scene>>>,
-    /// 文本绘图源码区的滚动状态（按块 id）
-    pub diagram_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
-    /// 弹框查看大图的绘图块 id
-    pub diagram_preview: Option<u64>,
-    /// 大图弹框的缩放倍数（相对「适应窗口」）
-    pub diagram_preview_zoom: f32,
-    /// 在预览图上按下鼠标的 (块, 位置)：抬起时没移动就算单击（弹框预览）
-    pub diagram_click: Option<(usize, Point<Pixels>)>,
     /// 单击弹框的延迟序号：双击会让它作废
     pub diagram_click_epoch: u64,
-    url_paste: Option<urlpaste::UrlPaste>,
     /// 各同步组上次写入同步表的内容
     sync_saved: std::collections::HashMap<String, String>,
     pub slash_scroll: ScrollHandle,
     /// 斜杠菜单滚动条的拖动状态
     pub slash_bar: crate::ui::ScrollDrag,
-    /// 不换行空格宽度 / 字号（每帧测量）
-    pub nbsp_w: std::cell::Cell<f32>,
-    nbsp_measured: bool,
     /// 是否需要闪烁光标（渲染时按焦点 / 窗口激活状态更新）
     blink_on: bool,
-    /// 阅读模式：不接受修改（见 reading.rs）
-    read_only: bool,
-    /// 进入阅读模式时的文档快照，漏进来的修改回滚到它
-    ro_doc: Option<Vec<Arc<Block>>>,
-    /// 正在编辑的行内公式 (块, 槽, 偏移)
-    pub inline_math_at: Option<(usize, usize, usize)>,
-    reveal_pending: std::cell::Cell<u8>,
-    /// 聚焦模式的根块 id（见 fold.rs）
-    pub focus_root: Option<u64>,
-    /// 隐藏块掩码缓存：((版本, 聚焦根), 掩码)
-    fold_cache: RefCell<Option<((u64, Option<u64>), Rc<Vec<bool>>)>>,
+    pub core: EditCore,
+    pub caches: RenderCaches,
+    pub sess: DocSession,
+    pub tb: ToolbarState,
 }
 
 pub const MAX_INDENT: u8 = 8;
@@ -533,79 +555,34 @@ impl Editor {
             store,
             focus: cx.focus_handle(),
             list: ListState::new(n, ListAlignment::Top, px(600.)),
-            anchor: start,
-            head: start,
-            marked: None,
-            goal_x: None,
-            pending_marks: None,
-            undo_stack: Default::default(),
-            redo_stack: Vec::new(),
-            last_edit: None,
             frame: Rc::new(RefCell::new(FrameInfo::default())),
-            selecting: false,
             cursor_visible: true,
             last_activity: Instant::now(),
-            numbers: (0, vec![]),
-            stats: (0, 0),
             find: None,
             show_perf: false,
-            tb_more_heading: false,
-            tb_hover_count: 0,
-            tb_hover_epoch: 0,
-            last_color: (None, Some(3)),
-            frame_times: VecDeque::with_capacity(240),
-            render_start: None,
             dirty: false,
             save_task: None,
             _blink: blink,
-            image_sizes: RefCell::new(HashMap::new()),
             typed_today: 0,
             countdown_fired: Default::default(),
-            html_live: None,
-            video_full: None,
             live_sheets: Default::default(),
             live_bases: Default::default(),
-            file_full: None,
-            img_views: HashMap::new(),
             uploads: HashMap::new(),
-            file_hover: None,
             file_hover_epoch: 0,
-            diagram_drag: None,
-            image_drag: None,
-            image_crop: None,
-            image_preview: None,
             avail_w: Rc::new(std::cell::Cell::new(render::content_w())),
-            image_sel: None,
             comments,
-            comment_input: None,
-            comment_open: None,
             table_hover_epoch: 0,
-            button_bar: None,
             button_bar_epoch: 0,
             slash_at: point(px(0.), px(0.)),
-            table_geo: Default::default(),
-            table_col_drag: None,
-            table_insert_hover: None,
-            diagram_cache: RefCell::new(HashMap::new()),
-            diagram_good: RefCell::new(HashMap::new()),
-            diagram_scroll: Default::default(),
-            diagram_preview: None,
-            diagram_preview_zoom: 1.,
-            diagram_click: None,
             diagram_click_epoch: 0,
-            url_paste: None,
             sync_saved: Default::default(),
             slash_scroll: ScrollHandle::new(),
             slash_bar: Default::default(),
-            nbsp_w: std::cell::Cell::new(0.3),
-            nbsp_measured: false,
             blink_on: false,
-            read_only: false,
-            ro_doc: None,
-            inline_math_at: None,
-            reveal_pending: std::cell::Cell::new(0),
-            focus_root: None,
-            fold_cache: RefCell::new(None),
+            core: EditCore { anchor: start, head: start, ..Default::default() },
+            caches: RenderCaches { nbsp_w: std::cell::Cell::new(0.3), frame_times: VecDeque::with_capacity(240), ..Default::default() },
+            sess: DocSession::default(),
+            tb: ToolbarState { last_color: (None, Some(3)), ..Default::default() },
         }
     }
 
@@ -620,30 +597,16 @@ impl Editor {
         self.list.reset(n);
         let empty_title = self.content.blocks[0].text.is_empty();
         let start = Pos::new(if empty_title || n < 2 { 0 } else { 1 }, 0, 0);
-        self.anchor = start;
-        self.head = start;
-        self.marked = None;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.last_edit = None;
+        // 换文档：编辑核心与会话状态整体重置（浮层、预览、阅读模式、聚焦根都指向旧文档的块）
+        self.core = EditCore { anchor: start, head: start, ..Default::default() };
+        self.sess = DocSession::default();
         self.pop.slash = None;
-        self.url_paste = None;
         self.pop.block_menu = None;
         self.pop.lang_menu = None;
         self.pop.ordered_menu = None;
         self.pop.mention = None;
         self.pop.link_edit = None;
-        self.read_only = false;
-        self.ro_doc = None;
-        self.focus_root = None;
-        self.image_sel = None;
-        self.image_drag = None;
-        self.image_crop = None;
-        self.image_preview = None;
-        self.diagram_preview = None;
         self.pop.diagram_theme_menu = None;
-        self.comment_input = None;
-        self.comment_open = None;
         self.pop.table_picker = None;
         self.refresh_comments();
         if self.find.is_some() {
@@ -685,14 +648,14 @@ impl Editor {
     }
 
     pub fn has_selection(&self) -> bool {
-        self.anchor != self.head
+        self.core.anchor != self.core.head
     }
 
     pub fn sel(&self) -> (Pos, Pos) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
+        if self.core.anchor <= self.core.head {
+            (self.core.anchor, self.core.head)
         } else {
-            (self.head, self.anchor)
+            (self.core.head, self.core.anchor)
         }
     }
 
@@ -728,7 +691,7 @@ impl Editor {
 
     pub fn block_selected(&self, block: usize) -> bool {
         let (s, e) = self.sel();
-        (self.has_selection() && s.block <= block && block <= e.block) || (self.head.block == block && self.content.blocks[block].kind.is_void())
+        (self.has_selection() && s.block <= block && block <= e.block) || (self.core.head.block == block && self.content.blocks[block].kind.is_void())
     }
 
     /// 文本槽内模型偏移的屏幕坐标（考虑行内公式映射）。
@@ -740,17 +703,17 @@ impl Editor {
     }
 
     pub fn ordered_numbers(&mut self) -> &[usize] {
-        if self.numbers.0 != self.version {
-            self.numbers = (self.version, crate::convert::ordered_numbers(&self.content.blocks));
+        if self.caches.numbers.0 != self.version {
+            self.caches.numbers = (self.version, crate::convert::ordered_numbers(&self.content.blocks));
         }
-        &self.numbers.1
+        &self.caches.numbers.1
     }
 
     pub fn char_count(&mut self) -> usize {
-        if self.stats.0 != self.version {
-            self.stats = (self.version, self.content.char_count());
+        if self.caches.stats.0 != self.version {
+            self.caches.stats = (self.version, self.content.char_count());
         }
-        self.stats.1
+        self.caches.stats.1
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {
@@ -758,13 +721,13 @@ impl Editor {
     }
 
     pub fn image_size(&self, path: &str) -> Option<(u32, u32)> {
-        *self.image_sizes.borrow_mut().entry(path.to_string()).or_insert_with(|| image::image_dimensions(path).ok())
+        *self.caches.image_sizes.borrow_mut().entry(path.to_string()).or_insert_with(|| image::image_dimensions(path).ok())
     }
 
     // ───────────── 修改原语 ─────────────
 
     pub fn block_mut(&mut self, i: usize) -> &mut Block {
-        self.fold_cache.get_mut().take();
+        self.caches.fold_cache.get_mut().take();
         self.list.splice(i..i + 1, 1);
         Arc::make_mut(&mut self.content.blocks[i])
     }
@@ -775,7 +738,7 @@ impl Editor {
 
     pub fn insert_blocks(&mut self, at: usize, blocks: Vec<Block>) {
         let n = blocks.len();
-        self.fold_cache.get_mut().take();
+        self.caches.fold_cache.get_mut().take();
         self.content.blocks.splice(at..at, blocks.into_iter().map(Arc::new));
         self.list.splice(at..at, n);
     }
@@ -785,7 +748,7 @@ impl Editor {
         if range.is_empty() {
             return;
         }
-        self.fold_cache.get_mut().take();
+        self.caches.fold_cache.get_mut().take();
         self.content.blocks.drain(range.clone());
         self.list.splice(range, 0);
         if self.content.blocks.len() == 1 {
@@ -806,51 +769,51 @@ impl Editor {
         }
         self.list.splice(prefix..old.len() - suffix, new.len() - prefix - suffix);
         self.content.blocks = new;
-        self.fold_cache.get_mut().take();
+        self.caches.fold_cache.get_mut().take();
     }
 
     /// 记录撤销点。连续输入 / 连续删除合并为一步。
     pub fn checkpoint(&mut self, kind: EditKind) {
         // 阅读模式：修改会在 changed() 里回滚，不记撤销点
-        if self.read_only {
+        if self.sess.read_only {
             return;
         }
         let now = Instant::now();
-        let coalesce = kind != EditKind::Other && self.last_edit.is_some_and(|(k, t)| k == kind && now.duration_since(t) < Duration::from_millis(1200));
+        let coalesce = kind != EditKind::Other && self.core.last_edit.is_some_and(|(k, t)| k == kind && now.duration_since(t) < Duration::from_millis(1200));
         if !coalesce {
-            self.undo_stack.push_back(Snapshot { blocks: self.content.blocks.clone(), anchor: self.anchor, head: self.head });
-            if self.undo_stack.len() > 500 {
-                self.undo_stack.pop_front();
+            self.core.undo_stack.push_back(Snapshot { blocks: self.content.blocks.clone(), anchor: self.core.anchor, head: self.core.head });
+            if self.core.undo_stack.len() > 500 {
+                self.core.undo_stack.pop_front();
             }
         }
-        self.redo_stack.clear();
-        self.last_edit = Some((kind, now));
+        self.core.redo_stack.clear();
+        self.core.last_edit = Some((kind, now));
     }
 
     pub fn break_coalescing(&mut self) {
-        self.last_edit = None;
+        self.core.last_edit = None;
     }
 
     pub fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(snap) = self.undo_stack.pop_back() {
-            self.redo_stack.push(Snapshot { blocks: self.content.blocks.clone(), anchor: self.anchor, head: self.head });
+        if let Some(snap) = self.core.undo_stack.pop_back() {
+            self.core.redo_stack.push(Snapshot { blocks: self.content.blocks.clone(), anchor: self.core.anchor, head: self.core.head });
             self.restore(snap, cx);
         }
     }
 
     pub fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(snap) = self.redo_stack.pop() {
-            self.undo_stack.push_back(Snapshot { blocks: self.content.blocks.clone(), anchor: self.anchor, head: self.head });
+        if let Some(snap) = self.core.redo_stack.pop() {
+            self.core.undo_stack.push_back(Snapshot { blocks: self.content.blocks.clone(), anchor: self.core.anchor, head: self.core.head });
             self.restore(snap, cx);
         }
     }
 
     fn restore(&mut self, snap: Snapshot, cx: &mut Context<Self>) {
         self.replace_all(snap.blocks);
-        self.anchor = self.clamp(snap.anchor);
-        self.head = self.clamp(snap.head);
-        self.marked = None;
-        self.last_edit = None;
+        self.core.anchor = self.clamp(snap.anchor);
+        self.core.head = self.clamp(snap.head);
+        self.core.marked = None;
+        self.core.last_edit = None;
         self.pop.slash = None;
         self.changed(cx);
         self.reveal_head();
@@ -865,13 +828,13 @@ impl Editor {
         self.update_mention();
         // 编辑把光标带进了折叠区域（如合并到被收起的上一块）：展开。
         // 有些操作直接改块数组（移动块等），先丢掉掩码缓存
-        self.fold_cache.get_mut().take();
-        if self.reveal_block(self.head.block) {
+        self.caches.fold_cache.get_mut().take();
+        if self.reveal_block(self.core.head.block) {
             self.list.reset(self.content.blocks.len());
         }
         // 回到正文编辑：收起评论卡片（正在写评论时除外）
-        if self.comment_input.is_none() {
-            self.comment_open = None;
+        if self.sess.comment_input.is_none() {
+            self.sess.comment_open = None;
         }
         self.version += 1;
         self.dirty = true;
@@ -922,22 +885,22 @@ impl Editor {
 
     pub fn set_cursor(&mut self, p: Pos, extend: bool, cx: &mut Context<Self>) {
         // 裁剪中点到别处：同样直接应用当前裁剪框
-        if self.image_crop.as_ref().is_some_and(|c| c.block != p.block) {
+        if self.sess.image_crop.as_ref().is_some_and(|c| c.block != p.block) {
             self.crop_commit(cx);
         }
         let p = self.snap_merge(self.clamp(p));
         // 光标进入折叠 / 聚焦之外的区域：先展开
-        self.fold_cache.get_mut().take();
+        self.caches.fold_cache.get_mut().take();
         if self.reveal_block(p.block) {
             self.list.reset(self.content.blocks.len());
             self.schedule_save(cx);
         }
-        self.head = p;
+        self.core.head = p;
         if !extend {
-            self.anchor = p;
+            self.core.anchor = p;
         }
-        self.marked = None;
-        self.pending_marks = None;
+        self.core.marked = None;
+        self.core.pending_marks = None;
         self.break_coalescing();
         self.touch_activity();
         if let Some(s) = &self.pop.slash {
@@ -972,16 +935,16 @@ impl Editor {
     /// 请求「让光标可见」。真正的滚动在本帧绘制完成后进行（那时才知道光标的精确坐标），
     /// 见 render.rs 中的 `finish_reveal`。
     pub fn reveal_head(&self) {
-        self.reveal_pending.set(3);
+        self.caches.reveal_pending.set(3);
     }
 
     /// 绘制后调用：根据光标的真实位置精确滚动。返回是否需要再绘制一帧。
     pub(crate) fn finish_reveal(&self) -> bool {
-        let left = self.reveal_pending.get();
+        let left = self.caches.reveal_pending.get();
         if left == 0 {
             return false;
         }
-        self.reveal_pending.set(left - 1);
+        self.caches.reveal_pending.set(left - 1);
         if self.reveal_in_diagram_source() {
             return true;
         }
@@ -991,10 +954,10 @@ impl Editor {
         }
         let margin = px(48.);
         let frame = self.frame.borrow();
-        let target = frame.cursor.or_else(|| frame.voids.get(&self.head.block).copied());
+        let target = frame.cursor.or_else(|| frame.voids.get(&self.core.head.block).copied());
         match target {
             Some(c) if c.top() >= vp.top() && c.bottom() <= vp.bottom() => {
-                self.reveal_pending.set(0);
+                self.caches.reveal_pending.set(0);
                 false
             }
             Some(c) if c.bottom() > vp.bottom() => {
@@ -1007,7 +970,7 @@ impl Editor {
             }
             None => {
                 // 光标所在块不在渲染范围内：先把它滚到视口上方附近，下一帧再精调
-                self.list.scroll_to(ListOffset { item_ix: self.head.block.saturating_sub(1), offset_in_item: px(0.) });
+                self.list.scroll_to(ListOffset { item_ix: self.core.head.block.saturating_sub(1), offset_in_item: px(0.) });
                 true
             }
         }
@@ -1015,11 +978,11 @@ impl Editor {
 
     /// 光标在文本绘图源码区（限高、可滚动）里时，先滚动源码区让光标可见。返回是否滚动了。
     fn reveal_in_diagram_source(&self) -> bool {
-        let Some(blk) = self.content.blocks.get(self.head.block) else { return false };
+        let Some(blk) = self.content.blocks.get(self.core.head.block) else { return false };
         if !matches!(blk.kind, crate::model::BlockKind::Diagram { .. }) {
             return false;
         }
-        let Some((h, _)) = self.diagram_scroll.borrow().get(&blk.id).cloned() else { return false };
+        let Some((h, _)) = self.caches.diagram_scroll.borrow().get(&blk.id).cloned() else { return false };
         let Some(c) = self.frame.borrow().cursor else { return false };
         let (view, max) = (h.bounds(), h.max_offset().height);
         if max <= px(0.) || view.size.height <= px(0.) {
@@ -1053,7 +1016,7 @@ impl Editor {
             return;
         }
         self.checkpoint(EditKind::Other);
-        let at = (self.head.block + 1).min(self.content.blocks.len());
+        let at = (self.core.head.block + 1).min(self.content.blocks.len());
         let n = blocks.len();
         self.insert_blocks(at, blocks);
         self.set_cursor(Pos::new(at + n - 1, 0, 0), false, cx);
@@ -1098,8 +1061,8 @@ impl Editor {
         }
         let input = cx.new(|cx| LineInput::new("在文档中查找", cx));
         // 有选区时用选中文本作为初始查询
-        if let Some(r) = self.sel_in_slot(self.head.slot()).filter(|_| self.anchor.slot() == self.head.slot()) {
-            if let Some(t) = self.slot_text(self.head.slot()) {
+        if let Some(r) = self.sel_in_slot(self.core.head.slot()).filter(|_| self.core.anchor.slot() == self.core.head.slot()) {
+            if let Some(t) = self.slot_text(self.core.head.slot()) {
                 let q = t.text[r].to_string();
                 input.update(cx, |i, cx| i.set_text(&q, cx));
             }
@@ -1144,7 +1107,7 @@ impl Editor {
                 }
             }
         }
-        let head = self.head;
+        let head = self.core.head;
         let f = self.find.as_mut().unwrap();
         f.current = matches.iter().position(|(p, _)| *p >= head).unwrap_or(0);
         f.matches = matches;
@@ -1162,8 +1125,8 @@ impl Editor {
         if self.reveal_block(p.block) {
             self.list.reset(self.content.blocks.len());
         }
-        self.anchor = p;
-        self.head = Pos { offset: p.offset + len, ..p };
+        self.core.anchor = p;
+        self.core.head = Pos { offset: p.offset + len, ..p };
         self.reveal_head();
         cx.notify();
     }
@@ -1177,10 +1140,10 @@ impl Editor {
     }
 
     pub fn perf_stats(&self) -> (f32, f32, f32) {
-        if self.frame_times.is_empty() {
+        if self.caches.frame_times.is_empty() {
             return (0., 0., 0.);
         }
-        let mut v: Vec<f32> = self.frame_times.iter().copied().collect();
+        let mut v: Vec<f32> = self.caches.frame_times.iter().copied().collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = v[v.len() / 2];
         let p95 = v[((v.len() as f32 * 0.95) as usize).min(v.len() - 1)];

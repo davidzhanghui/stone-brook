@@ -9,24 +9,24 @@ impl Editor {
     pub(super) fn tb_hover_open(&mut self, m: Option<TbMenu>, cx: &mut Context<Self>) {
         if m.is_some() && self.pop.tb_menu != m {
             self.pop.tb_menu = m;
-            self.tb_more_heading = false;
-            self.tb_hover_count = 1;
+            self.tb.tb_more_heading = false;
+            self.tb.tb_hover_count = 1;
             cx.notify();
         } else {
-            self.tb_hover_count += 1;
+            self.tb.tb_hover_count += 1;
         }
     }
 
     pub(super) fn tb_hover_leave(&mut self, cx: &mut Context<Self>) {
-        self.tb_hover_count = self.tb_hover_count.saturating_sub(1);
-        self.tb_hover_epoch += 1;
-        let epoch = self.tb_hover_epoch;
+        self.tb.tb_hover_count = self.tb.tb_hover_count.saturating_sub(1);
+        self.tb.tb_hover_epoch += 1;
+        let epoch = self.tb.tb_hover_epoch;
         cx.spawn(async move |this: WeakEntity<Editor>, cx: &mut AsyncApp| {
             cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
             this.update(cx, |this, cx| {
-                if this.tb_hover_epoch == epoch && this.tb_hover_count == 0 && this.pop.tb_menu.is_some() {
+                if this.tb.tb_hover_epoch == epoch && this.tb.tb_hover_count == 0 && this.pop.tb_menu.is_some() {
                     this.pop.tb_menu = None;
-                    this.tb_more_heading = false;
+                    this.tb.tb_more_heading = false;
                     cx.notify();
                 }
             })
@@ -86,8 +86,8 @@ impl Editor {
                 cx.stop_propagation();
                 if this.pop.tb_menu != Some(m) {
                     this.pop.tb_menu = Some(m);
-                    this.tb_more_heading = false;
-                    this.tb_hover_count = 1;
+                    this.tb.tb_more_heading = false;
+                    this.tb.tb_hover_count = 1;
                 }
                 cx.notify();
             })
@@ -125,7 +125,7 @@ impl Editor {
             2 => "text-right",
             _ => "text-left",
         };
-        let (lfg, lbg) = self.last_color;
+        let (lfg, lbg) = self.tb.last_color;
         let lfg_c = lfg.filter(|c| *c > 0).map(|c| t.fg_palette[c as usize & 7]).unwrap_or(t.text);
         let lbg_c = lbg.filter(|c| *c > 0).map(|c| t.text_bg(c));
 
@@ -229,7 +229,7 @@ impl Editor {
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
-                            let (fg, bg) = this.last_color;
+                            let (fg, bg) = this.tb.last_color;
                             this.set_color(fg, bg, cx);
                         }),
                     ),
@@ -332,7 +332,7 @@ impl Editor {
                         }),
                     )
                 };
-                let more_open = self.tb_more_heading;
+                let more_open = self.tb.tb_more_heading;
                 let more_on = matches!(cur_kind, Some(BlockKind::Heading { level }) if level >= 4);
                 Some(
                     panel(200.)
@@ -347,7 +347,7 @@ impl Editor {
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| {
                                         cx.stop_propagation();
-                                        this.tb_more_heading = !this.tb_more_heading;
+                                        this.tb.tb_more_heading = !this.tb.tb_more_heading;
                                         cx.notify();
                                     }),
                                 ),
@@ -460,7 +460,7 @@ impl Editor {
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.last_color.0 = Some(c);
+                                this.tb.last_color.0 = Some(c);
                                 this.set_color(Some(c), None, cx);
                             }),
                         )
@@ -474,7 +474,7 @@ impl Editor {
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.last_color.1 = Some(c);
+                                    this.tb.last_color.1 = Some(c);
                                     this.set_color(None, Some(c), cx);
                                 }),
                             )

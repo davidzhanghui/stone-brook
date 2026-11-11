@@ -369,88 +369,7 @@ impl BaseEditor {
                         );
                 }
                 Some((s, e)) => {
-                    let (x0, x1) = (x_of(s), x_of(e) + dp);
-                    let days_n = if v.workdays_only { workdays_between(&v, s, e) } else { (e - s) / DAY + 1 };
-                    let progress = prog_field
-                        .as_ref()
-                        .and_then(|f| self.b().fval(&self.tid, rid, f).num())
-                        .map(|p| if p > 1. { p / 100. } else { p }.clamp(0., 1.) as f32);
-                    let (r2, r3, r4) = (rid.clone(), rid.clone(), rid.clone());
-                    let handle = |id: String, mode: u8, rid: String, cx: &mut Context<Self>| {
-                        div()
-                            .id(SharedString::from(id))
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .w(px(8.))
-                            .when(mode == 1, |d| d.left_0())
-                            .when(mode == 2, |d| d.right_0())
-                            .cursor_col_resize()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    let v = this.view();
-                                    if let Some(sp) = this.span(&rid, &v) {
-                                        this.drag = Some(Drag::Bar { rid: rid.clone(), mode, start_x: ev.position.x, orig: sp, moved: false });
-                                    }
-                                }),
-                            )
-                    };
-                    lane = lane.child(
-                        div()
-                            .id(SharedString::from(format!("bar-{rid}")))
-                            .absolute()
-                            .left(px(x0))
-                            .w(px((x1 - x0).max(dp)))
-                            .top(px(8.))
-                            .h(px(ROW_H - 16.))
-                            .rounded(px(5.))
-                            .bg(color)
-                            .shadow_sm()
-                            .flex()
-                            .items_center()
-                            .px(px(8.))
-                            .text_size(px(12.))
-                            .text_color(white())
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .cursor_grab()
-                            .relative()
-                            .when_some(progress, |d, p| d.child(div().absolute().left_0().top_0().bottom_0().w(relative(p)).bg(black().opacity(0.18))))
-                            .child(if x1 - x0 > 80. {
-                                format!(
-                                    "{title} · {days_n} {}{}",
-                                    if v.workdays_only { "个工作日" } else { "天" },
-                                    progress.map(|p| format!(" · {}%", (p * 100.).round())).unwrap_or_default()
-                                )
-                            } else {
-                                String::new()
-                            })
-                            .child(handle(format!("bl-{rid}"), 1, r3, cx))
-                            .child(handle(format!("br-{rid}"), 2, r4, cx))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, _cx| {
-                                    let v = this.view();
-                                    if let Some(sp) = this.span(&r2, &v) {
-                                        this.drag = Some(Drag::Bar { rid: r2.clone(), mode: 0, start_x: ev.position.x, orig: sp, moved: false });
-                                    }
-                                }),
-                            ),
-                    );
-                    if x1 - x0 <= 80. {
-                        lane = lane.child(
-                            div()
-                                .absolute()
-                                .left(px(x1 + 6.))
-                                .top(px(11.))
-                                .text_size(px(12.))
-                                .text_color(t.text_secondary)
-                                .whitespace_nowrap()
-                                .child(title.clone()),
-                        );
-                    }
+                    lane = self.render_gantt_part(t, cx, color, dp, e, lane, &prog_field, rid, s, &title, v.clone(), sx, lo);
                 }
                 None => {
                     // 没有日期：点击时间轴直接排期
@@ -483,94 +402,9 @@ impl BaseEditor {
                 }
             }
             let r5 = rid.clone();
-            body = body
-                .child(
-                    div()
-                        .id(SharedString::from(format!("gl-{rid}")))
-                        .absolute()
-                        .left_0()
-                        .top(px(y))
-                        .w(px(LIST_W))
-                        .h(px(ROW_H))
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .border_b_1()
-                        .border_r_1()
-                        .border_color(t.border)
-                        .bg(t.bg)
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(t.hover))
-                        .child(div().text_size(px(11.)).text_color(t.text_muted).w(px(22.)).child(n_task.to_string()))
-                        .child(div().w(px(tdepth as f32 * 14.)).flex_none())
-                        .when(tree.iter().any(|x| x.1 > 0) || !self.b().children_of(&self.tid, rid).is_empty(), |d| {
-                            let open = !collapsed.contains(&format!("t:{rid}"));
-                            let kids = !self.b().children_of(&self.tid, rid).is_empty();
-                            let r6 = rid.clone();
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("gtc-{rid}")))
-                                    .size(px(14.))
-                                    .flex_none()
-                                    .when(kids, |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., t.text_secondary)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        let k = format!("t:{r6}");
-                                        let tid = this.tid.clone();
-                                        let mut v = this.view();
-                                        if v.collapsed.contains(&k) {
-                                            v.collapsed.retain(|x| x != &k);
-                                        } else {
-                                            v.collapsed.push(k);
-                                        }
-                                        this.bm().put_view(&tid, v);
-                                        this.bm().commit_silent();
-                                        cx.notify();
-                                    })),
-                            )
-                        })
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.detail = Some(r5.clone());
-                            cx.notify();
-                        })),
-                )
-                .child(lane);
+            body = body.child(self.render_gantt_part_2(t, cx, &collapsed, n_task, r5.clone(), rid, tdepth, title.clone(), &tree, y)).child(lane);
         }
-        body = body.child(
-            div()
-                .id("g-add")
-                .absolute()
-                .left_0()
-                .top(px(lines.len() as f32 * ROW_H))
-                .w(px(LIST_W))
-                .h(px(ROW_H))
-                .px(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(13.))
-                .text_color(t.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.bg(t.hover))
-                .child(icon("plus", 14., t.text_muted))
-                .child("新增任务")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let v = this.view();
-                    let mut preset = vec![];
-                    if let Some(f) = v.date_field.clone() {
-                        preset.push((f, Value::from(formula::today())));
-                    }
-                    if let Some(f) = v.end_field.clone() {
-                        preset.push((f, Value::from(formula::today() + 3 * DAY)));
-                    }
-                    if let Some(rid) = this.add_record(preset, None, cx) {
-                        this.detail = Some(rid);
-                    }
-                })),
-        );
+        body = body.child(self.render_gantt_g_add(t, cx, &lines));
         list = list
             .child(
                 div().absolute().left(px(LIST_W)).top_0().right_0().h(px((lines.len() as f32 + 1.) * ROW_H).max(px(2000.))).overflow_hidden().child(grid_lines),
@@ -651,6 +485,201 @@ impl BaseEditor {
                 }
             }))
             .into_any_element()
+    }
+    /// 从 `render_gantt` 拆出。
+    fn render_gantt_g_add(&self, t: &Theme, cx: &mut Context<Self>, lines: &[GLine]) -> AnyElement {
+        div()
+            .id("g-add")
+            .absolute()
+            .left_0()
+            .top(px(lines.len() as f32 * ROW_H))
+            .w(px(LIST_W))
+            .h(px(ROW_H))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .text_color(t.text_muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(t.hover))
+            .child(icon("plus", 14., t.text_muted))
+            .child("新增任务")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let v = this.view();
+                let mut preset = vec![];
+                if let Some(f) = v.date_field.clone() {
+                    preset.push((f, Value::from(formula::today())));
+                }
+                if let Some(f) = v.end_field.clone() {
+                    preset.push((f, Value::from(formula::today() + 3 * DAY)));
+                }
+                if let Some(rid) = this.add_record(preset, None, cx) {
+                    this.detail = Some(rid);
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// 从 `render_gantt` 拆出。
+    fn render_gantt_part_2(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        collapsed: &[String],
+        n_task: usize,
+        r5: String,
+        rid: &String,
+        tdepth: usize,
+        title: String,
+        tree: &std::rc::Rc<Vec<(String, usize, bool)>>,
+        y: f32,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("gl-{rid}")))
+            .absolute()
+            .left_0()
+            .top(px(y))
+            .w(px(LIST_W))
+            .h(px(ROW_H))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .border_b_1()
+            .border_r_1()
+            .border_color(t.border)
+            .bg(t.bg)
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(|s| s.bg(t.hover))
+            .child(div().text_size(px(11.)).text_color(t.text_muted).w(px(22.)).child(n_task.to_string()))
+            .child(div().w(px(tdepth as f32 * 14.)).flex_none())
+            .when(tree.iter().any(|x| x.1 > 0) || !self.b().children_of(&self.tid, rid).is_empty(), |d| {
+                let open = !collapsed.contains(&format!("t:{rid}"));
+                let kids = !self.b().children_of(&self.tid, rid).is_empty();
+                let r6 = rid.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("gtc-{rid}")))
+                        .size(px(14.))
+                        .flex_none()
+                        .when(kids, |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 11., t.text_secondary)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let k = format!("t:{r6}");
+                            let tid = this.tid.clone();
+                            let mut v = this.view();
+                            if v.collapsed.contains(&k) {
+                                v.collapsed.retain(|x| x != &k);
+                            } else {
+                                v.collapsed.push(k);
+                            }
+                            this.bm().put_view(&tid, v);
+                            this.bm().commit_silent();
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.detail = Some(r5.clone());
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// 从 `render_gantt` 拆出。
+    fn render_gantt_part(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        color: Hsla,
+        dp: f32,
+        e: i64,
+        mut lane: Div,
+        prog_field: &Option<String>,
+        rid: &String,
+        s: i64,
+        title: &String,
+        v: View,
+        sx: f32,
+        lo: i64,
+    ) -> Div {
+        let x_of = |ms: i64| ((ms - lo) / DAY) as f32 * dp - sx;
+        let (x0, x1) = (x_of(s), x_of(e) + dp);
+        let days_n = if v.workdays_only { workdays_between(&v, s, e) } else { (e - s) / DAY + 1 };
+        let progress = prog_field.as_ref().and_then(|f| self.b().fval(&self.tid, rid, f).num()).map(|p| if p > 1. { p / 100. } else { p }.clamp(0., 1.) as f32);
+        let (r2, r3, r4) = (rid.clone(), rid.clone(), rid.clone());
+        let handle = |id: String, mode: u8, rid: String, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(id))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(8.))
+                .when(mode == 1, |d| d.left_0())
+                .when(mode == 2, |d| d.right_0())
+                .cursor_col_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let v = this.view();
+                        if let Some(sp) = this.span(&rid, &v) {
+                            this.drag = Some(Drag::Bar { rid: rid.clone(), mode, start_x: ev.position.x, orig: sp, moved: false });
+                        }
+                    }),
+                )
+        };
+        lane = lane.child(
+            div()
+                .id(SharedString::from(format!("bar-{rid}")))
+                .absolute()
+                .left(px(x0))
+                .w(px((x1 - x0).max(dp)))
+                .top(px(8.))
+                .h(px(ROW_H - 16.))
+                .rounded(px(5.))
+                .bg(color)
+                .shadow_sm()
+                .flex()
+                .items_center()
+                .px(px(8.))
+                .text_size(px(12.))
+                .text_color(white())
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .cursor_grab()
+                .relative()
+                .when_some(progress, |d, p| d.child(div().absolute().left_0().top_0().bottom_0().w(relative(p)).bg(black().opacity(0.18))))
+                .child(if x1 - x0 > 80. {
+                    format!(
+                        "{title} · {days_n} {}{}",
+                        if v.workdays_only { "个工作日" } else { "天" },
+                        progress.map(|p| format!(" · {}%", (p * 100.).round())).unwrap_or_default()
+                    )
+                } else {
+                    String::new()
+                })
+                .child(handle(format!("bl-{rid}"), 1, r3, cx))
+                .child(handle(format!("br-{rid}"), 2, r4, cx))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, _cx| {
+                        let v = this.view();
+                        if let Some(sp) = this.span(&r2, &v) {
+                            this.drag = Some(Drag::Bar { rid: r2.clone(), mode: 0, start_x: ev.position.x, orig: sp, moved: false });
+                        }
+                    }),
+                ),
+        );
+        if x1 - x0 <= 80. {
+            lane = lane.child(
+                div().absolute().left(px(x1 + 6.)).top(px(11.)).text_size(px(12.)).text_color(t.text_secondary).whitespace_nowrap().child(title.clone()),
+            );
+        }
+        lane
     }
 
     pub(super) fn gantt_drag_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {

@@ -171,10 +171,10 @@ pub fn filter_slash(query: &str) -> Vec<SlashItem> {
 
 impl Editor {
     pub(super) fn current_marks(&self) -> Marks {
-        if let Some(m) = &self.pending_marks {
+        if let Some(m) = &self.core.pending_marks {
             return m.clone();
         }
-        self.slot_text(self.head.slot()).map(|t| t.marks_at(self.head.offset)).unwrap_or_default()
+        self.slot_text(self.core.head.slot()).map(|t| t.marks_at(self.core.head.offset)).unwrap_or_default()
     }
 
     /// 所有被选中的 (文本槽, 区间)。
@@ -199,12 +199,12 @@ impl Editor {
         if s.is_empty() {
             return;
         }
-        self.url_paste = None;
+        self.sess.url_paste = None;
         self.checkpoint(EditKind::Typing);
         if self.has_selection() {
             self.delete_selection_inner();
         }
-        let h = self.head;
+        let h = self.core.head;
         if self.content.blocks[h.block].kind.is_void() {
             // 后面紧跟空段落时直接复用它，否则新建段落
             let next_empty = self.content.blocks.get(h.block + 1).is_some_and(|b| matches!(b.kind, BlockKind::Text) && b.text.text.is_empty());
@@ -213,8 +213,8 @@ impl Editor {
             } else {
                 self.insert_blocks(h.block + 1, vec![Block::text(s)]);
             }
-            self.head = Pos::new(h.block + 1, 0, s.len());
-            self.anchor = self.head;
+            self.core.head = Pos::new(h.block + 1, 0, s.len());
+            self.core.anchor = self.core.head;
             let mut chars = s.chars();
             if let (Some(ch), None) = (chars.next(), chars.next()) {
                 self.after_char_typed(ch);
@@ -227,8 +227,8 @@ impl Editor {
         let s = if h.block == 0 { s.replace('\n', " ") } else { s.to_string() };
         let marks = self.current_marks();
         self.slot_mut(h.slot()).insert(h.offset, &s, marks);
-        self.head.offset += s.len();
-        self.anchor = self.head;
+        self.core.head.offset += s.len();
+        self.core.anchor = self.core.head;
         self.typed_today += s.chars().filter(|c| !c.is_whitespace()).count();
         let mut chars = s.chars();
         if let (Some(ch), None) = (chars.next(), chars.next()) {
@@ -240,7 +240,7 @@ impl Editor {
     }
 
     fn after_char_typed(&mut self, ch: char) {
-        let h = self.head;
+        let h = self.core.head;
         let kind = self.content.blocks[h.block].kind.clone();
         if matches!(ch, '@' | '＠') {
             self.open_mention();
@@ -268,15 +268,15 @@ impl Editor {
             if line.len() >= 4 && line.chars().all(|c| c == ' ') {
                 let at = h.offset - 1 - 4;
                 self.block_mut(h.block).text.delete(at..at + 4);
-                self.head.offset -= 4;
-                self.anchor = self.head;
+                self.core.head.offset -= 4;
+                self.core.anchor = self.core.head;
             }
         }
     }
 
     /// 行首 Markdown 语法：`# `、`- `、`1. `、`[] `、`> `、```` ``` ````……
     fn try_block_shortcut(&mut self) {
-        let h = self.head;
+        let h = self.core.head;
         let text = &self.content.blocks[h.block].text.text;
         let prefix = &text[..h.offset - 1];
         let kind = match prefix {
@@ -303,14 +303,14 @@ impl Editor {
         let b = self.block_mut(h.block);
         b.text.delete(0..h.offset);
         b.kind = kind;
-        self.head.offset = 0;
-        self.anchor = self.head;
-        self.pending_marks = None;
+        self.core.head.offset = 0;
+        self.core.anchor = self.core.head;
+        self.core.pending_marks = None;
     }
 
     /// 行内 Markdown：`**粗体**`、`*斜体*`、`~~删除线~~`、`` `代码` ``。
     fn try_inline_shortcut(&mut self) {
-        let h = self.head;
+        let h = self.core.head;
         let Some(t) = self.slot_text(h.slot()) else { return };
         let before = &t.text[..h.offset];
         let rules: [(&str, fn(&mut Marks)); 4] = [("**", |m| m.bold = true), ("~~", |m| m.strike = true), ("`", |m| m.code = true), ("*", |m| m.italic = true)];
@@ -336,10 +336,10 @@ impl Editor {
             slot.delete(inner_end..h.offset);
             slot.delete(open..inner_start);
             slot.update_marks(open..open + inner_len, apply);
-            self.head.offset = open + inner_len;
-            self.anchor = self.head;
+            self.core.head.offset = open + inner_len;
+            self.core.anchor = self.core.head;
             // 之后输入的文字不再继承该样式
-            let mut m = self.slot_text(h.slot()).unwrap().marks_at(self.head.offset);
+            let mut m = self.slot_text(h.slot()).unwrap().marks_at(self.core.head.offset);
             let mut probe = Marks::default();
             apply(&mut probe);
             if probe.bold {
@@ -354,14 +354,14 @@ impl Editor {
             if probe.code {
                 m.code = false
             }
-            self.pending_marks = Some(m);
+            self.core.pending_marks = Some(m);
             return;
         }
     }
 
     /// `$E=mc^2$` → 行内公式
     fn try_inline_math(&mut self) {
-        let h = self.head;
+        let h = self.core.head;
         let Some(t) = self.slot_text(h.slot()) else { return };
         let before = &t.text[..h.offset - 1];
         let Some(open) = before.rfind('$') else { return };
@@ -373,15 +373,15 @@ impl Editor {
         let slot = self.slot_mut(h.slot());
         slot.delete(open..h.offset);
         slot.insert_math(open, &tex);
-        self.head.offset = open + 3;
-        self.anchor = self.head;
-        self.pending_marks = Some(Marks::default());
+        self.core.head.offset = open + 3;
+        self.core.anchor = self.core.head;
+        self.core.pending_marks = Some(Marks::default());
     }
 
     pub(super) fn update_slash(&mut self) {
         self.update_mention();
         let Some(sm) = &self.pop.slash else { return };
-        let h = self.head;
+        let h = self.core.head;
         let close = (|| -> Option<bool> {
             if h.block != sm.block || h.cell != 0 || h.offset <= sm.start {
                 return Some(true);
@@ -408,7 +408,7 @@ impl Editor {
         let Some(sm) = &self.pop.slash else { return String::new() };
         let t = &self.content.blocks[sm.block].text.text;
         let first_len = t[sm.start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        t.get(sm.start + first_len..self.head.offset).unwrap_or("").to_string()
+        t.get(sm.start + first_len..self.core.head.offset).unwrap_or("").to_string()
     }
 
     pub fn apply_slash(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -417,10 +417,10 @@ impl Editor {
         let Some(item) = items.into_iter().nth(index) else { return };
         self.checkpoint(EditKind::Other);
         let bi = sm.block;
-        let end = self.head.offset.max(sm.start);
+        let end = self.core.head.offset.max(sm.start);
         self.block_mut(bi).text.delete(sm.start..end);
-        self.head = Pos::new(bi, 0, sm.start);
-        self.anchor = self.head;
+        self.core.head = Pos::new(bi, 0, sm.start);
+        self.core.anchor = self.core.head;
         let current_empty = self.content.blocks[bi].text.is_empty() && self.content.blocks[bi].kind == BlockKind::Text;
         let insert_new = |this: &mut Self, blk: Block| -> usize {
             let at = if current_empty {
@@ -447,18 +447,18 @@ impl Editor {
             }
             SlashAction::Divider => {
                 let at = insert_new(self, Block::new(BlockKind::Divider, RichText::default()));
-                self.head = Pos::new(at + 1, 0, 0);
+                self.core.head = Pos::new(at + 1, 0, 0);
             }
             SlashAction::Table => {
                 // 鼠标悬停时右侧已弹出行列选择器（见 show_slash_table_picker）；
                 // 直接点击「表格」则插入默认 3×3。
                 self.pop.table_picker = None;
                 let at = insert_new(self, Block::table(3, 3));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Columns => {
                 let at = insert_new(self, Block::columns(2));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Date => {
                 let now = chrono::Local::now();
@@ -466,81 +466,81 @@ impl Editor {
                 let s = format!("{} 周{}", now.format("%Y-%m-%d"), wd);
                 let m = self.current_marks();
                 self.block_mut(bi).text.insert(sm.start, &s, m);
-                self.head.offset = sm.start + s.len();
+                self.core.head.offset = sm.start + s.len();
             }
             SlashAction::Image => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.pick_images(window, cx);
                 return;
             }
             SlashAction::File => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.pick_files(window, cx);
                 return;
             }
             SlashAction::Drawio => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.pick_drawio(cx);
                 return;
             }
             SlashAction::Link => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.open_prop_edit(bi, "insert_link", "", "粘贴或输入网址，回车插入链接", caret_pos, window, cx);
                 return;
             }
             SlashAction::Math => {
                 let at = insert_new(self, Block::new(BlockKind::Math, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Diagram(tpl) => {
                 let at = insert_new(self, Block::new(BlockKind::Diagram { view: 0, offsets: Default::default() }, RichText::plain(tpl)));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Html => {
                 let at = insert_new(self, Block::new(BlockKind::Html { scripts: false, file: String::new(), network: true }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Toc => {
                 let at = insert_new(self, Block::new(BlockKind::Toc, RichText::default()));
-                self.head = Pos::new(at + 1, 0, 0);
+                self.core.head = Pos::new(at + 1, 0, 0);
             }
             SlashAction::Timeline => {
                 // 两个空节点，水平交替排列，光标进第一个节点的标题
                 let items = vec![crate::model::TimelineItem::default(), crate::model::TimelineItem::default()];
                 let at = insert_new(self, Block::new(BlockKind::Timeline { items, vertical: false, same_side: false, hide: 0 }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::Countdown => {
                 // 插入后显示 00:00:00:00，悬停点「设置」再填时长或日期
                 let target = chrono::Local::now().timestamp_millis();
                 let at = insert_new(self, Block::new(BlockKind::Countdown { target, color: 1, notify: false, dur: Some(0) }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
+                self.core.head = Pos::new(at, 0, 0);
             }
             SlashAction::ButtonUrl | SlashAction::ButtonDup => {
                 let (action, label) =
                     if matches!(item.action, SlashAction::ButtonUrl) { ("open_url", "打开超链接") } else { ("duplicate_doc", "创建副本") };
                 let style = crate::model::button_style(crate::model::BUTTON_DEFAULT_COLOR);
                 let at = insert_new(self, Block::new(BlockKind::Button { action: action.into(), url: String::new(), style }, RichText::plain(label)));
-                self.head = Pos::new(at, 0, 0);
-                self.anchor = self.head;
+                self.core.head = Pos::new(at, 0, 0);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.open_button_edit(at, true, window, cx);
                 return;
             }
             SlashAction::WebCard => {
                 let at = insert_new(self, Block::new(BlockKind::LinkCard { url: String::new() }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
-                self.anchor = self.head;
+                self.core.head = Pos::new(at, 0, 0);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.open_prop_edit(at, "link_url", "", "输入网址，回车生成网页卡片", caret_pos, window, cx);
                 return;
             }
             SlashAction::Embed("base:link") => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 cx.emit(EditorEvent::PickBase);
                 return;
@@ -557,8 +557,8 @@ impl Editor {
                     }),
                 };
                 let at = insert_new(self, Block::new(BlockKind::Embed { kind: "base".into(), id: id.clone() }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
-                self.anchor = self.head;
+                self.core.head = Pos::new(at, 0, 0);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 cx.emit(EditorEvent::OpenEmbed { kind: "base".into(), id });
                 return;
@@ -566,38 +566,39 @@ impl Editor {
             SlashAction::Embed("mindmap") => {
                 // 思维导图就是一个预置了导图的画板，插入后直接进入画板编辑
                 let doc = crate::board::model::BoardDoc::with_mind(None, 0, crate::theme::theme(cx).dark);
-                let id = crate::objects::create("board", Some(crate::objects::ObjData::Board(Arc::new(doc))));
+                let id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(Arc::new(doc))));
                 let at = insert_new(self, Block::new(BlockKind::Embed { kind: "board".into(), id: id.clone() }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
-                self.anchor = self.head;
+                self.core.head = Pos::new(at, 0, 0);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 cx.emit(EditorEvent::OpenEmbed { kind: "board".into(), id });
                 return;
             }
             SlashAction::Embed(kind) => {
-                let id = crate::objects::create(kind, None);
+                let Some(k) = crate::objects::ObjKind::parse(kind) else { return };
+                let id = crate::objects::create(k, None);
                 let at = insert_new(self, Block::new(BlockKind::Embed { kind: kind.into(), id: id.clone() }, RichText::default()));
-                self.head = Pos::new(at, 0, 0);
-                self.anchor = self.head;
+                self.core.head = Pos::new(at, 0, 0);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 cx.emit(EditorEvent::OpenEmbed { kind: kind.into(), id });
                 return;
             }
             SlashAction::Template => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 cx.emit(EditorEvent::PickTemplate);
                 return;
             }
             SlashAction::Sync => {
-                self.anchor = self.head;
+                self.core.anchor = self.core.head;
                 self.changed(cx);
                 self.pop.sync_menu = true;
                 cx.notify();
                 return;
             }
         }
-        self.anchor = self.head;
+        self.core.anchor = self.core.head;
         self.changed(cx);
         self.reveal_head();
     }
@@ -616,14 +617,14 @@ impl Editor {
     /// 删除选区（不记录撤销点、不通知）。
     pub(super) fn delete_selection_inner(&mut self) {
         let (s, e) = self.sel();
-        self.marked = None;
+        self.core.marked = None;
         if s == e {
             return;
         }
         if s.slot() == e.slot() {
             self.slot_mut(s.slot()).delete(s.offset..e.offset);
-            self.head = s;
-            self.anchor = s;
+            self.core.head = s;
+            self.core.anchor = s;
             return;
         }
         if let Some((r1, c1, r2, c2)) = self.table_sel_rect(s.block) {
@@ -639,14 +640,14 @@ impl Editor {
                 }
                 origin = r1 * *cols + c1;
             }
-            self.head = Pos::new(s.block, origin, 0);
-            self.anchor = self.head;
+            self.core.head = Pos::new(s.block, origin, 0);
+            self.core.anchor = self.core.head;
             return;
         }
         if s.block == e.block {
             Self::clear_cells(self.block_mut(s.block), (s.cell, s.offset), (e.cell, e.offset));
-            self.head = s;
-            self.anchor = s;
+            self.core.head = s;
+            self.core.anchor = s;
             return;
         }
         let (sb, eb) = (s.block, e.block);
@@ -706,8 +707,8 @@ impl Editor {
             self.insert_blocks(1, vec![Block::text("")]);
         }
         let cursor = if start_kept { s } else { Pos::new(sb, 0, 0) };
-        self.head = self.clamp(cursor);
-        self.anchor = self.head;
+        self.core.head = self.clamp(cursor);
+        self.core.anchor = self.core.head;
     }
 
     pub fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
@@ -717,14 +718,14 @@ impl Editor {
             self.changed(cx);
             return;
         }
-        let h = self.head;
+        let h = self.core.head;
         let kind = self.content.blocks[h.block].kind.clone();
         if kind.is_void() {
             self.checkpoint(EditKind::Other);
             self.remove_blocks(h.block..h.block + 1);
             let p = if h.block > 1 { self.slot_end(h.block - 1) } else { Pos::new(1, 0, 0) };
-            self.head = self.clamp(p);
-            self.anchor = self.head;
+            self.core.head = self.clamp(p);
+            self.core.anchor = self.core.head;
             self.changed(cx);
             return;
         }
@@ -733,8 +734,8 @@ impl Editor {
             let t = self.slot_text(h.slot()).unwrap();
             let prev = t.text[..h.offset].grapheme_indices(true).next_back().map(|(i, _)| i).unwrap_or(0);
             self.slot_mut(h.slot()).delete(prev..h.offset);
-            self.head.offset = prev;
-            self.anchor = self.head;
+            self.core.head.offset = prev;
+            self.core.anchor = self.core.head;
             self.update_slash();
             self.changed(cx);
             return;
@@ -772,23 +773,23 @@ impl Editor {
             let tail = if pk == BlockKind::Title { RichText::plain(cur_text.text.replace('\n', " ")) } else { cur_text };
             self.block_mut(prev).text.append(&tail);
             self.remove_blocks(h.block..h.block + 1);
-            self.head = Pos::new(prev, 0, plen);
+            self.core.head = Pos::new(prev, 0, plen);
         } else if pk.is_void() {
             if cur_text.is_empty() {
                 self.remove_blocks(h.block..h.block + 1);
-                self.head = Pos::new(prev, 0, 0);
+                self.core.head = Pos::new(prev, 0, 0);
             } else {
                 self.remove_blocks(prev..prev + 1);
-                self.head = Pos::new(prev, 0, 0);
+                self.core.head = Pos::new(prev, 0, 0);
             }
         } else {
             if cur_text.is_empty() {
                 self.remove_blocks(h.block..h.block + 1);
             }
-            self.head = self.slot_end(prev);
+            self.core.head = self.slot_end(prev);
         }
-        self.head = self.clamp(self.head);
-        self.anchor = self.head;
+        self.core.head = self.clamp(self.core.head);
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -799,13 +800,13 @@ impl Editor {
             self.changed(cx);
             return;
         }
-        let h = self.head;
+        let h = self.core.head;
         let kind = self.content.blocks[h.block].kind.clone();
         if kind.is_void() {
             self.checkpoint(EditKind::Other);
             self.remove_blocks(h.block..h.block + 1);
-            self.head = self.clamp(Pos::new(h.block, 0, 0));
-            self.anchor = self.head;
+            self.core.head = self.clamp(Pos::new(h.block, 0, 0));
+            self.core.anchor = self.core.head;
             self.changed(cx);
             return;
         }
@@ -846,8 +847,8 @@ impl Editor {
     pub fn delete_word_back(&mut self, _: &DeleteWordBack, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_selection() {
             let p = self.word_left_pos();
-            if p.slot() == self.head.slot() {
-                self.anchor = p;
+            if p.slot() == self.core.head.slot() {
+                self.core.anchor = p;
             }
         }
         self.backspace(&Backspace, window, cx);
@@ -856,7 +857,7 @@ impl Editor {
     pub fn delete_line_back(&mut self, _: &DeleteLineBack, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_selection() {
             let p = self.line_edge(false);
-            self.anchor = p;
+            self.core.anchor = p;
         }
         self.backspace(&Backspace, window, cx);
     }
@@ -864,7 +865,7 @@ impl Editor {
     // ───────────── 回车 / Tab ─────────────
 
     pub fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.image_crop.is_some() {
+        if self.sess.image_crop.is_some() {
             self.crop_commit(cx);
             return;
         }
@@ -882,11 +883,11 @@ impl Editor {
         if self.has_selection() {
             self.delete_selection_inner();
         }
-        let h = self.head;
+        let h = self.core.head;
         let blk = self.content.blocks[h.block].clone();
         let insert_after = |this: &mut Self, b: Block| {
             this.insert_blocks(h.block + 1, vec![b]);
-            this.head = Pos::new(h.block + 1, 0, 0);
+            this.core.head = Pos::new(h.block + 1, 0, 0);
         };
         match &blk.kind {
             k if k.is_void() => insert_after(self, Block::text("")),
@@ -899,20 +900,20 @@ impl Editor {
                 } else {
                     self.insert_blocks(1, vec![Block::new(BlockKind::Text, tail)]);
                 }
-                self.head = Pos::new(1, 0, 0);
+                self.core.head = Pos::new(1, 0, 0);
             }
             BlockKind::Timeline { hide, .. } => {
                 // 回车跳到同节点下一个可见字段；已是最后一个字段时在其后新增节点
                 use crate::model::TL_SLOTS;
                 let (k, f) = (h.cell / TL_SLOTS, h.cell % TL_SLOTS);
                 match (f + 1..TL_SLOTS).find(|i| hide & (1 << i) == 0) {
-                    Some(nf) => self.head = Pos::new(h.block, k * TL_SLOTS + nf, 0),
+                    Some(nf) => self.core.head = Pos::new(h.block, k * TL_SLOTS + nf, 0),
                     None => {
                         if let BlockKind::Timeline { items, .. } = &mut self.block_mut(h.block).kind {
                             items.insert(k + 1, crate::model::TimelineItem::default());
                         }
                         let first = (0..TL_SLOTS).find(|i| hide & (1 << i) == 0).unwrap_or(0);
-                        self.head = Pos::new(h.block, (k + 1) * TL_SLOTS + first, 0);
+                        self.core.head = Pos::new(h.block, (k + 1) * TL_SLOTS + first, 0);
                     }
                 }
             }
@@ -926,7 +927,7 @@ impl Editor {
                 }
                 let m = self.current_marks();
                 self.slot_mut(h.slot()).insert(h.offset, &s, m);
-                self.head.offset += s.len();
+                self.core.head.offset += s.len();
             }
             BlockKind::Text if matches!(blk.text.text.as_str(), "---" | "***" | "___" | "——") => {
                 let b = self.block_mut(h.block);
@@ -939,7 +940,7 @@ impl Editor {
                 let b = self.block_mut(h.block);
                 b.kind = BlockKind::Code { lang };
                 b.text = RichText::default();
-                self.head = Pos::new(h.block, 0, 0);
+                self.core.head = Pos::new(h.block, 0, 0);
             }
             BlockKind::Quote | BlockKind::Callout { .. } | BlockKind::Notes => {
                 let t = &blk.text;
@@ -953,7 +954,7 @@ impl Editor {
                 } else {
                     let m = self.current_marks();
                     self.slot_mut(h.slot()).insert(h.offset, "\n", m);
-                    self.head.offset += 1;
+                    self.core.head.offset += 1;
                 }
             }
             k if k.is_list() && blk.text.is_empty() => {
@@ -966,7 +967,7 @@ impl Editor {
             }
             BlockKind::Heading { .. } if h.offset == 0 && !blk.text.is_empty() => {
                 self.insert_blocks(h.block, vec![Block::text("")]);
-                self.head = Pos::new(h.block + 1, 0, 0);
+                self.core.head = Pos::new(h.block + 1, 0, 0);
             }
             // 行首回车：在上方插一个同类型的空块，原块（连同它的评论、同步关系）整体下移，不被拆成新块
             k if h.offset == 0 && !blk.text.is_empty() && (*k == BlockKind::Text || k.is_list()) => {
@@ -982,7 +983,7 @@ impl Editor {
                     self.block_mut(h.block).num = None;
                 }
                 self.insert_blocks(h.block, vec![nb]);
-                self.head = Pos::new(h.block + 1, 0, 0);
+                self.core.head = Pos::new(h.block + 1, 0, 0);
             }
             _ => {
                 let tail = self.block_mut(h.block).text.split_off(h.offset);
@@ -997,26 +998,26 @@ impl Editor {
                     // 收起的项：新的同级项接在整棵子树后面（Workflowy 的行为）
                     let at = super::fold::subtree(&self.content.blocks, h.block).end;
                     self.insert_blocks(at, vec![nb]);
-                    self.head = Pos::new(at, 0, 0);
+                    self.core.head = Pos::new(at, 0, 0);
                 } else {
                     insert_after(self, nb);
                 }
             }
         }
-        self.anchor = self.head;
+        self.core.anchor = self.core.head;
         self.changed(cx);
         self.reveal_head();
     }
 
     pub fn soft_enter(&mut self, _: &SoftEnter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.head.block == 0 || self.content.blocks[self.head.block].kind.is_void() {
+        if self.core.head.block == 0 || self.content.blocks[self.core.head.block].kind.is_void() {
             return;
         }
         self.insert_text("\n", cx);
     }
 
     pub fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
-        let h = self.head;
+        let h = self.core.head;
         match self.content.blocks[h.block].kind.clone() {
             BlockKind::Table { rows, cols, .. } => {
                 // 后面的格子可能全被合并覆盖：没有可见格时同样在末尾加一行
@@ -1028,7 +1029,7 @@ impl Editor {
                 }
                 let p = Pos::new(h.block, next, 0);
                 let len = self.slot_len(p.slot());
-                self.anchor = p;
+                self.core.anchor = p;
                 self.set_cursor(Pos { offset: len, ..p }, true, cx);
             }
             BlockKind::Columns { cols } => {
@@ -1042,7 +1043,7 @@ impl Editor {
     }
 
     pub fn shift_tab(&mut self, _: &ShiftTab, _: &mut Window, cx: &mut Context<Self>) {
-        let h = self.head;
+        let h = self.core.head;
         match self.content.blocks[h.block].kind {
             BlockKind::Table { .. } | BlockKind::Columns { .. } => {
                 if h.cell > 0 {
@@ -1060,8 +1061,8 @@ impl Editor {
                 if n > 0 {
                     self.checkpoint(EditKind::Other);
                     self.block_mut(h.block).text.delete(line_start..line_start + n);
-                    self.head.offset = self.head.offset.saturating_sub(n).max(line_start);
-                    self.anchor = self.head;
+                    self.core.head.offset = self.core.head.offset.saturating_sub(n).max(line_start);
+                    self.core.anchor = self.core.head;
                     self.changed(cx);
                 }
             }
@@ -1096,7 +1097,7 @@ impl Editor {
             let mut m = self.current_marks();
             let v = !get(&m);
             set(&mut m, v);
-            self.pending_marks = Some(m);
+            self.core.pending_marks = Some(m);
             cx.notify();
             return;
         }
@@ -1279,8 +1280,8 @@ impl Editor {
                 blk.indent = 0;
             }
         }
-        self.head = self.clamp(self.head);
-        self.anchor = self.clamp(self.anchor);
+        self.core.head = self.clamp(self.core.head);
+        self.core.anchor = self.clamp(self.core.anchor);
         self.changed(cx);
     }
 
@@ -1324,7 +1325,7 @@ impl Editor {
     }
 
     pub fn toggle_todo(&mut self, _: &ToggleTodo, _: &mut Window, cx: &mut Context<Self>) {
-        let b = self.head.block;
+        let b = self.core.head.block;
         if matches!(self.content.blocks[b].kind, BlockKind::Todo { .. }) {
             self.toggle_todo_at(b, cx);
         } else {
@@ -1350,14 +1351,14 @@ impl Editor {
             }
         }
         self.insert_blocks(b + 1, vec![copy]);
-        self.head = Pos::new(b + 1, 0, 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(b + 1, 0, 0);
+        self.core.anchor = self.core.head;
         self.pop.block_menu = None;
         self.changed(cx);
     }
 
     pub fn duplicate_block(&mut self, _: &DuplicateBlock, _: &mut Window, cx: &mut Context<Self>) {
-        self.duplicate_block_at(self.head.block, cx)
+        self.duplicate_block_at(self.core.head.block, cx)
     }
 
     pub fn delete_block_at(&mut self, b: usize, cx: &mut Context<Self>) {
@@ -1366,8 +1367,8 @@ impl Editor {
         }
         self.checkpoint(EditKind::Other);
         self.remove_blocks(b..b + 1);
-        self.head = self.clamp(Pos::new(b.min(self.content.blocks.len() - 1), 0, 0));
-        self.anchor = self.head;
+        self.core.head = self.clamp(Pos::new(b.min(self.content.blocks.len() - 1), 0, 0));
+        self.core.anchor = self.core.head;
         self.pop.block_menu = None;
         self.changed(cx);
     }
@@ -1383,8 +1384,8 @@ impl Editor {
         let dest = if from < to { to - 1 } else { to };
         self.content.blocks.insert(dest, blk);
         self.list.splice(dest..dest, 1);
-        self.head = Pos::new(dest, 0, 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(dest, 0, 0);
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -1406,7 +1407,7 @@ impl Editor {
             self.list.splice(s..e + 2, e - s + 2);
         }
         // 标题不随之移动：只平移落在被移动区间里的端点
-        for p in [&mut self.head, &mut self.anchor] {
+        for p in [&mut self.core.head, &mut self.core.anchor] {
             if p.block >= s {
                 p.block = (p.block as i32 + d) as usize;
             }
@@ -1423,8 +1424,8 @@ impl Editor {
     }
 
     pub fn set_block_kind_at(&mut self, b: usize, kind: BlockKind, cx: &mut Context<Self>) {
-        self.head = Pos::new(b, 0, 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(b, 0, 0);
+        self.core.anchor = self.core.head;
         self.pop.block_menu = None;
         self.set_kind(kind, cx);
     }
@@ -1554,8 +1555,8 @@ impl Editor {
         if remove_all {
             self.remove_blocks(b..b + 1);
         }
-        self.head = self.clamp(Pos::new(b, self.head.cell, 0));
-        self.anchor = self.head;
+        self.core.head = self.clamp(Pos::new(b, self.core.head.cell, 0));
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -1596,8 +1597,8 @@ impl Editor {
         if remove_all {
             self.remove_blocks(b..b + 1);
         }
-        self.head = self.clamp(Pos::new(b, 0, 0));
-        self.anchor = self.head;
+        self.core.head = self.clamp(Pos::new(b, 0, 0));
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -1660,11 +1661,11 @@ impl Editor {
             return;
         }
         self.checkpoint(EditKind::Other);
-        let end = self.head.offset.max(sm.start);
+        let end = self.core.head.offset.max(sm.start);
         let end = end.min(self.content.blocks[bi].text.len());
         self.block_mut(bi).text.delete(sm.start..end);
-        self.head = Pos::new(bi, 0, sm.start);
-        self.anchor = self.head;
+        self.core.head = Pos::new(bi, 0, sm.start);
+        self.core.anchor = self.core.head;
         let current_empty = self.content.blocks[bi].text.is_empty() && self.content.blocks[bi].kind == BlockKind::Text;
         let at = if current_empty {
             let indent = self.content.blocks[bi].indent;
@@ -1681,8 +1682,8 @@ impl Editor {
         if at + 1 >= self.content.blocks.len() {
             self.insert_blocks(at + 1, vec![Block::text("")]);
         }
-        self.head = Pos::new(at, 0, 0);
-        self.anchor = self.head;
+        self.core.head = Pos::new(at, 0, 0);
+        self.core.anchor = self.core.head;
         self.changed(cx);
         self.reveal_head();
     }
@@ -1733,8 +1734,8 @@ impl Editor {
         }
         match landed {
             Some((origin, len)) => {
-                self.head = Pos::new(b, origin, len);
-                self.anchor = self.head;
+                self.core.head = Pos::new(b, origin, len);
+                self.core.anchor = self.core.head;
                 self.changed(cx);
             }
             None => cx.emit(EditorEvent::Toast("先选中多个单元格再合并".into())),
@@ -1743,7 +1744,7 @@ impl Editor {
 
     /// 拆分光标所在的合并单元格。
     pub fn table_split_cell(&mut self, b: usize, cx: &mut Context<Self>) {
-        let cell = self.head.cell;
+        let cell = self.core.head.cell;
         self.checkpoint(EditKind::Other);
         if let BlockKind::Table { cols, merges, .. } = &mut self.block_mut(b).kind {
             let (r, c) = (cell / *cols, cell % *cols);
@@ -1832,7 +1833,7 @@ impl Editor {
         }
         let BlockKind::Table { cols, merges, .. } = &self.content.blocks.get(b)?.kind else { return None };
         let cols = (*cols).max(1);
-        let cell = if self.head.block == b { self.head.cell } else { 0 };
+        let cell = if self.core.head.block == b { self.core.head.cell } else { 0 };
         let (r, c, rs, cs) = crate::model::merge_origin(merges, cell / cols, cell % cols);
         Some((r, c, r + rs - 1, c + cs - 1))
     }
@@ -1841,11 +1842,11 @@ impl Editor {
     pub fn table_select(&mut self, b: usize, (r1, c1, r2, c2): (usize, usize, usize, usize), cx: &mut Context<Self>) {
         let BlockKind::Table { cols, .. } = self.content.blocks[b].kind else { return };
         let (a, z) = (r1 * cols + c1, r2 * cols + c2);
-        self.anchor = Pos::new(b, a, 0);
-        self.head = Pos::new(b, z, self.slot_len((b, z)));
+        self.core.anchor = Pos::new(b, a, 0);
+        self.core.head = Pos::new(b, z, self.slot_len((b, z)));
         // 1×1 的「整行 / 整列」：退化成选中这一格的全部文字
         if a == z {
-            self.anchor = Pos::new(b, a, 0);
+            self.core.anchor = Pos::new(b, a, 0);
         }
         self.pop.slash = None;
         self.break_coalescing();
@@ -1856,19 +1857,19 @@ impl Editor {
     /// 按下列边线：记下各列当前像素宽度，开始拖动。
     pub fn start_table_col_drag(&mut self, b: usize, col: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
         let id = self.content.blocks[b].id;
-        let Some(geo) = self.table_geo.borrow().get(&id).cloned() else { return };
+        let Some(geo) = self.caches.table_geo.borrow().get(&id).cloned() else { return };
         let start: Vec<f32> = geo.cols.iter().map(|c| f32::from(c.size.width)).collect();
         if col + 1 >= start.len() {
             return;
         }
-        self.table_col_drag = Some(TableColDrag { block: b, col, start_x: at.x, cur: start.clone(), start });
+        self.sess.table_col_drag = Some(TableColDrag { block: b, col, start_x: at.x, cur: start.clone(), start });
         cx.notify();
     }
 
     /// 拖动中：只在相邻两列之间挪宽度，表格总宽不变。
     pub fn drag_table_col(&mut self, x: Pixels, cx: &mut Context<Self>) {
         const MIN_COL: f32 = 44.;
-        let Some(d) = self.table_col_drag.as_mut() else { return };
+        let Some(d) = self.sess.table_col_drag.as_mut() else { return };
         let (l, r) = (d.start[d.col], d.start[d.col + 1]);
         let left = (l + f32::from(x - d.start_x)).clamp(MIN_COL.min(l), (l + r - MIN_COL).max(l.min(MIN_COL)));
         d.cur[d.col] = left;
@@ -1878,7 +1879,7 @@ impl Editor {
 
     /// 松开列边线：宽度有变化才写入（并记一步撤销）。
     pub fn end_table_col_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(d) = self.table_col_drag.take() else { return };
+        let Some(d) = self.sess.table_col_drag.take() else { return };
         if d.cur.iter().zip(&d.start).any(|(a, b)| (a - b).abs() >= 1.) {
             let total: f32 = d.cur.iter().sum::<f32>().max(1.);
             let n = d.cur.len() as f32;
@@ -1903,15 +1904,15 @@ impl Editor {
                 }
             }
         }
-        self.head = self.clamp(self.head);
-        self.anchor = self.clamp(self.anchor);
+        self.core.head = self.clamp(self.core.head);
+        self.core.anchor = self.clamp(self.core.anchor);
         self.changed(cx);
     }
 
     // ───────────── 其他 ─────────────
 
     pub fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        let slot = self.head.slot();
+        let slot = self.core.head.slot();
         let len = self.slot_len(slot);
         let (s, e) = self.sel();
         let whole_slot = s == Pos::new(slot.0, slot.1, 0) && e == Pos::new(slot.0, slot.1, len);
@@ -1922,22 +1923,22 @@ impl Editor {
                 None => (0, self.content.blocks.len()),
             };
             let last = self.visible_from(end - 1, false).filter(|l| *l >= first).unwrap_or(first);
-            self.anchor = Pos::new(first, 0, 0);
-            self.head = self.slot_end(last);
+            self.core.anchor = Pos::new(first, 0, 0);
+            self.core.head = self.slot_end(last);
         } else {
-            self.anchor = Pos::new(slot.0, slot.1, 0);
-            self.head = Pos::new(slot.0, slot.1, len);
+            self.core.anchor = Pos::new(slot.0, slot.1, 0);
+            self.core.head = Pos::new(slot.0, slot.1, len);
         }
         self.pop.slash = None;
         cx.notify();
     }
 
     pub fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.image_preview.take().is_some() || self.diagram_preview.take().is_some() || self.pop.diagram_theme_menu.take().is_some() {
+        if self.sess.image_preview.take().is_some() || self.sess.diagram_preview.take().is_some() || self.pop.diagram_theme_menu.take().is_some() {
             cx.notify();
             return;
         }
-        if self.image_crop.is_some() {
+        if self.sess.image_crop.is_some() {
             self.crop_cancel(cx);
             return;
         }
@@ -1949,12 +1950,12 @@ impl Editor {
             self.countdown_cancel(window, cx);
             return;
         }
-        if self.file_full.take().is_some() {
+        if self.sess.file_full.take().is_some() {
             crate::webview::hide_live();
             cx.notify();
             return;
         }
-        if self.video_full.take().is_some()
+        if self.sess.video_full.take().is_some()
             || self.pop.prop_edit.take().is_some()
             || self.pop.tl_menu.take().is_some()
             || self.pop.countdown_color.take().is_some()
@@ -1962,7 +1963,7 @@ impl Editor {
             cx.notify();
             return;
         }
-        if self.html_live.take().is_some() {
+        if self.sess.html_live.take().is_some() {
             crate::webview::hide_live();
             cx.notify();
             return;
@@ -1980,7 +1981,7 @@ impl Editor {
         } else if self.find.is_some() {
             self.close_find(window, cx);
         } else if self.has_selection() {
-            self.anchor = self.head;
+            self.core.anchor = self.core.head;
             cx.notify();
         } else {
             self.exit_focus(cx);

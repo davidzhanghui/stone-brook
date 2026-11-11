@@ -8,11 +8,12 @@ use block2::RcBlock;
 use gpui::{AsyncApp, BackgroundExecutor};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSBackingStoreType, NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWindow, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_foundation::NSObjectProtocol;
 use objc2_foundation::{NSData, NSDictionary, NSError, NSNumber, NSObjectNSKeyValueCoding, NSString, NSURLRequest, NSURL};
-use objc2_web_kit::{WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{WKNavigationDelegate, WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -21,12 +22,76 @@ use std::time::{Duration, Instant};
 thread_local! {
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
     static BUSY: Cell<bool> = const { Cell::new(false) };
+    /// 导航守卫（WKWebView 对 delegate 是弱引用，必须自己持有）。0 = 只允许本地，1 = 允许联网（抓网页封面用）
+    static GUARDS: [Retained<NavGuard>; 2] = [NavGuard::new(false), NavGuard::new(true)];
 }
 
 struct Host {
     _window: Retained<NSWindow>,
     view: Retained<WKWebView>,
     js_view: Retained<WKWebView>,
+    /// 抓取外部网页用的独立 WebView：允许顶层导航，与渲染公式 / HTML 块的视图不共享任何状态
+    fetch_view: Retained<WKWebView>,
+}
+
+// ───────────── 导航守卫 ─────────────
+//
+// CSP 的 `default-src 'none'` 管不了顶层跳转：`<meta http-equiv="refresh">`（无脚本也生效）或 `location.href=`
+// 都能把页面带到任意网址，绕过「联网」开关，也能把页面内容拼在 URL 里带出去。
+// 规则：主框架只允许本地地址（file / about / data / blob / applewebdata）；用户点击的 http(s) 链接交给系统浏览器打开；
+// 其余一律取消。子框架（iframe）不在这里管，由 CSP 与联网开关控制。
+
+struct GuardIvars {
+    allow_remote: bool,
+}
+
+objc2::define_class!(
+    // SAFETY: NSObject 没有子类化要求；NavGuard 没有实现 Drop
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "StonebrookNavGuard"]
+    #[ivars = GuardIvars]
+    struct NavGuard;
+
+    unsafe impl NSObjectProtocol for NavGuard {}
+
+    unsafe impl WKNavigationDelegate for NavGuard {
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        fn decide(
+            &self,
+            _web_view: &WKWebView,
+            action: &objc2_web_kit::WKNavigationAction,
+            handler: &block2::DynBlock<dyn Fn(objc2_web_kit::WKNavigationActionPolicy)>,
+        ) {
+            use objc2_web_kit::{WKNavigationActionPolicy as P, WKNavigationType};
+            let main = unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
+            let url = unsafe { action.request() }.URL();
+            let scheme = url.as_ref().and_then(|u| u.scheme()).map(|s| s.to_string().to_lowercase()).unwrap_or_default();
+            let decision = if !main || self.ivars().allow_remote || nav_allowed_locally(&scheme) {
+                P::Allow
+            } else {
+                if unsafe { action.navigationType() } == WKNavigationType::LinkActivated && matches!(scheme.as_str(), "http" | "https" | "mailto") {
+                    if let Some(u) = &url {
+                        objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(u);
+                    }
+                }
+                P::Cancel
+            };
+            handler.call((decision,));
+        }
+    }
+);
+
+impl NavGuard {
+    fn new(allow_remote: bool) -> Retained<Self> {
+        let this = Self::alloc(mtm()).set_ivars(GuardIvars { allow_remote });
+        unsafe { objc2::msg_send![super(this), init] }
+    }
+}
+
+/// 主框架可以导航到的本地地址。
+fn nav_allowed_locally(scheme: &str) -> bool {
+    matches!(scheme, "file" | "about" | "data" | "blob" | "applewebdata" | "")
 }
 
 /// 渲染选项。
@@ -61,26 +126,37 @@ fn mtm() -> MainThreadMarker {
 }
 
 fn make_view(scripts: bool) -> Retained<WKWebView> {
-    make_view_with(scripts, false)
+    make_view_full(scripts, false, false)
 }
 
 /// autoplay：允许媒体无需用户点击直接播放（播放页里点一下即播放）
 fn make_view_with(scripts: bool, autoplay: bool) -> Retained<WKWebView> {
+    make_view_full(scripts, autoplay, false)
+}
+
+/// 所有 WebView 都用不落盘的数据仓库（Cookie / localStorage / 缓存不写进应用的默认存储，彼此也不共享），
+/// 并挂上导航守卫。`allow_remote` 只给抓取外部网页的视图。
+fn make_view_full(scripts: bool, autoplay: bool, allow_remote: bool) -> Retained<WKWebView> {
     let mtm = mtm();
     unsafe {
         let config = WKWebViewConfiguration::new(mtm);
+        config.setWebsiteDataStore(&objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm));
         if autoplay {
             config.setMediaTypesRequiringUserActionForPlayback(objc2_web_kit::WKAudiovisualMediaTypes::None);
         }
         let prefs = config.preferences();
-        // 隐藏的 WebView 默认会被系统降频甚至暂停，关闭这个策略才能稳定离屏渲染
-        prefs.setInactiveSchedulingPolicy(objc2_web_kit::WKInactiveSchedulingPolicy::None);
+        // 隐藏的 WebView 默认会被系统降频甚至暂停，关闭这个策略才能稳定离屏渲染。
+        // 该接口 macOS 14 起才有；应用声明支持 macOS 12+，旧系统上直接调用会因未知 selector 崩溃。
+        if prefs.respondsToSelector(objc2::sel!(setInactiveSchedulingPolicy:)) {
+            prefs.setInactiveSchedulingPolicy(objc2_web_kit::WKInactiveSchedulingPolicy::None);
+        }
         let page_prefs = config.defaultWebpagePreferences();
         page_prefs.setAllowsContentJavaScript(scripts);
         let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(800., 600.));
         let view = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
         // 透明背景：公式等截图需要叠加在任意底色上
         view.setValue_forKey(Some(&NSNumber::new_bool(false)), &NSString::from_str("drawsBackground"));
+        GUARDS.with(|g| view.setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*g[allow_remote as usize]))));
         view
     }
 }
@@ -106,12 +182,14 @@ fn with_host<R>(f: impl FnOnce(&Host) -> R) -> R {
             };
             let view = make_view(false);
             let js_view = make_view(true);
+            let fetch_view = make_view_full(true, false, true);
             if let Some(content) = window.contentView() {
                 content.addSubview(&view);
                 content.addSubview(&js_view);
+                content.addSubview(&fetch_view);
             }
             window.orderFrontRegardless();
-            *h = Some(Host { _window: window, view, js_view });
+            *h = Some(Host { _window: window, view, js_view, fetch_view });
         }
         f(h.as_ref().unwrap())
     })
@@ -292,7 +370,7 @@ pub async fn render_elements(
 pub async fn snapshot_url(cx: &AsyncApp, url: &str) -> Option<Snapshot> {
     let ex = cx.background_executor().clone();
     let _guard = acquire(&ex).await;
-    let view = view_for(true);
+    let view = with_host(|h| h.fetch_view.clone());
     set_frame(&view, 1200., 630.);
     unsafe {
         let u = NSURL::URLWithString(&NSString::from_str(url))?;
@@ -573,7 +651,7 @@ pub enum SnapState {
 }
 
 thread_local! {
-    static SNAPS: RefCell<std::collections::HashMap<String, SnapState>> = RefCell::new(std::collections::HashMap::new());
+    static SNAPS: RefCell<crate::lru::Lru<String, SnapState>> = RefCell::new(crate::lru::Lru::new(512));
 }
 
 /// HTML 块快照：已缓存直接返回，否则排队渲染（完成后刷新窗口）。

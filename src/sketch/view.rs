@@ -1264,8 +1264,7 @@ impl SketchEditor {
 
 /// 8 个缩放手柄：左上、上、右上、右、右下、下、左下、左（与 corners 顺序一致）
 pub(super) fn handles_of(q: &[V; 4]) -> Vec<V> {
-    let mid = |a: V, b: V| v((a.x + b.x) / 2., (a.y + b.y) / 2.);
-    vec![q[0], mid(q[0], q[1]), q[1], mid(q[1], q[2]), q[2], mid(q[2], q[3]), q[3], mid(q[3], q[0])]
+    crate::canvas::math::handles8(q).to_vec()
 }
 
 /// 旋转手柄：上边中点再往外 d

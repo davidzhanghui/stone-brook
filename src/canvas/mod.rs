@@ -7,6 +7,7 @@
 //! - `geom.rs`：形状轮廓、箭头、曲线等几何计算
 
 pub mod geom;
+pub mod math;
 pub mod paint;
 pub mod rich;
 pub mod svg;

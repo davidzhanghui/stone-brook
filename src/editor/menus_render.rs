@@ -124,21 +124,21 @@ impl Editor {
             })
             .when(self.content.blocks.get(ix).is_some_and(|b| b.sync.is_none()), |d| {
                 d.child(item("bm-sync", "link", "设为同步块", "", false).on_click(cx.listener(move |this, _, _, cx| {
-                    this.head = Pos::new(ix, 0, 0);
-                    this.anchor = this.head;
+                    this.core.head = Pos::new(ix, 0, 0);
+                    this.core.anchor = this.core.head;
                     this.pop.block_menu = None;
                     this.make_sync(cx);
                 })))
             })
             .child(item("bm-up", "arrow-up", "上移", "⌃⌘↑", false).on_click(cx.listener(move |this, _, _, cx| {
-                this.head = Pos::new(ix, 0, 0);
-                this.anchor = this.head;
+                this.core.head = Pos::new(ix, 0, 0);
+                this.core.anchor = this.core.head;
                 this.pop.block_menu = None;
                 this.move_block(-1, cx);
             })))
             .child(item("bm-down", "arrow-down", "下移", "⌃⌘↓", false).on_click(cx.listener(move |this, _, _, cx| {
-                this.head = Pos::new(ix, 0, 0);
-                this.anchor = this.head;
+                this.core.head = Pos::new(ix, 0, 0);
+                this.core.anchor = this.core.head;
                 this.pop.block_menu = None;
                 this.move_block(1, cx);
             })))
@@ -167,8 +167,8 @@ impl Editor {
                             .child(icon("chevron-right", 13., t.text_secondary))
                             .child(div().text_size(px(12.)).child(crate::i18n::tr("缩进")))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.head = Pos::new(ix, 0, 0);
-                                this.anchor = this.head;
+                                this.core.head = Pos::new(ix, 0, 0);
+                                this.core.anchor = this.core.head;
                                 this.pop.block_menu = None;
                                 this.tab(&Tab, window, cx);
                             })),
@@ -187,8 +187,8 @@ impl Editor {
                             .hover(|s| s.bg(t.hover))
                             .child(div().text_size(px(12.)).child(crate::i18n::tr("减少缩进")))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.head = Pos::new(ix, 0, 0);
-                                this.anchor = this.head;
+                                this.core.head = Pos::new(ix, 0, 0);
+                                this.core.anchor = this.core.head;
                                 this.pop.block_menu = None;
                                 this.shift_tab(&ShiftTab, window, cx);
                             })),
@@ -258,8 +258,8 @@ impl Editor {
                     BlockKind::Table { cols, merges, .. } => {
                         let (s, e) = self.sel();
                         let can = self.has_selection() && s.block == ix && e.block == ix && s.cell != e.cell;
-                        let cur = self.head.cell;
-                        let m = self.head.block == ix && crate::model::merge_at(merges, cur / cols.max(&1), cur % cols.max(&1)).is_some();
+                        let cur = self.core.head.cell;
+                        let m = self.core.head.block == ix && crate::model::merge_at(merges, cur / cols.max(&1), cur % cols.max(&1)).is_some();
                         (can, m)
                     }
                     _ => (false, false),

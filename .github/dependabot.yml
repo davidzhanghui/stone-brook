@@ -1,0 +1,7 @@
+# 只维护 GitHub Actions（已固定到提交哈希）。Rust 依赖大部分来自 vendor 的 GPUI，自动升级意义不大。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

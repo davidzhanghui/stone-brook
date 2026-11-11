@@ -69,7 +69,7 @@ impl Editor {
 
     /// 刚输入了 `@`：可以写正文的地方打开文档菜单。
     pub(super) fn open_mention(&mut self) {
-        let h = self.head;
+        let h = self.core.head;
         let Some(kind) = self.content.blocks.get(h.block).map(|b| b.kind.clone()) else { return };
         if h.block == 0 || kind.is_source() || matches!(kind, BlockKind::Code { .. }) || kind.is_void() || self.doc_list.0.is_empty() {
             return;
@@ -86,7 +86,7 @@ impl Editor {
         let m = self.pop.mention.as_ref()?;
         let t = self.slot_text((m.block, m.cell))?;
         let first = t.text.get(m.start..)?.chars().next()?.len_utf8();
-        t.text.get(m.start + first..self.head.offset).map(str::to_string)
+        t.text.get(m.start + first..self.core.head.offset).map(str::to_string)
     }
 
     /// 匹配的文档（不含当前文档），最多 MAX_ITEMS 篇。
@@ -104,7 +104,7 @@ impl Editor {
     /// 光标离开 `@…` 或查询里出现空白、没有匹配时关闭菜单。
     pub(super) fn update_mention(&mut self) {
         let Some(m) = &self.pop.mention else { return };
-        let h = self.head;
+        let h = self.core.head;
         let valid = h.block == m.block
             && h.cell == m.cell
             && h.offset > m.start
@@ -135,7 +135,7 @@ impl Editor {
         self.update_mention();
         let Some((id, title)) = self.mention_items().get(ix).cloned() else { return };
         let Some(m) = self.pop.mention.take() else { return };
-        let end = self.head.offset;
+        let end = self.core.head.offset;
         self.checkpoint(EditKind::Other);
         let title = if title.trim().is_empty() { "未命名文档".to_string() } else { title.replace('\n', " ") };
         let link = Marks { link: Some(doc_link(&id)), ..Default::default() };
@@ -143,9 +143,9 @@ impl Editor {
         slot.delete(m.start..end);
         slot.insert(m.start, &title, link);
         slot.insert(m.start + title.len(), " ", Marks::default());
-        self.head = Pos::new(m.block, m.cell, m.start + title.len() + 1);
-        self.anchor = self.head;
-        self.pending_marks = None;
+        self.core.head = Pos::new(m.block, m.cell, m.start + title.len() + 1);
+        self.core.anchor = self.core.head;
+        self.core.pending_marks = None;
         self.changed(cx);
     }
 
@@ -225,12 +225,12 @@ impl Editor {
 
     /// 在光标处插入音频时间戳链接；光标不在可写文字的位置时，在音频块后新起一段。
     pub fn insert_timestamp(&mut self, file: &str, secs: f64, cx: &mut Context<Self>) {
-        if self.read_only {
+        if self.sess.read_only {
             return;
         }
         let label = stamp_label(secs);
         let link = Marks { link: Some(seek_link(secs, file)), ..Default::default() };
-        let h = self.head;
+        let h = self.core.head;
         let writable = self
             .content
             .blocks
@@ -241,7 +241,7 @@ impl Editor {
             if self.has_selection() {
                 self.delete_selection_inner();
             }
-            let h = self.head;
+            let h = self.core.head;
             let before = self.slot_text(h.slot()).and_then(|t| t.text[..h.offset].chars().next_back());
             let mut at = h.offset;
             let slot = self.slot_mut(h.slot());
@@ -251,7 +251,7 @@ impl Editor {
             }
             slot.insert(at, &label, link);
             slot.insert(at + label.len(), " ", Marks::default());
-            self.head = Pos::new(h.block, h.cell, at + label.len() + 1);
+            self.core.head = Pos::new(h.block, h.cell, at + label.len() + 1);
         } else {
             let name = std::path::Path::new(file).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let at = self.audio_block(&name).map_or(h.block + 1, |(i, _, _)| i + 1).min(self.content.blocks.len());
@@ -260,10 +260,10 @@ impl Editor {
             text.insert(label.len(), " ", Marks::default());
             let n = text.len();
             self.insert_blocks(at, vec![crate::model::Block::new(BlockKind::Text, text)]);
-            self.head = Pos::new(at, 0, n);
+            self.core.head = Pos::new(at, 0, n);
         }
-        self.anchor = self.head;
-        self.pending_marks = None;
+        self.core.anchor = self.core.head;
+        self.core.pending_marks = None;
         self.reveal_head();
         self.changed(cx);
     }

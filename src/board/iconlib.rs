@@ -229,33 +229,34 @@ pub fn insert_size(name: &str) -> (f32, f32) {
 }
 
 thread_local! {
-    static RASTER: RefCell<HashMap<(String, u32), Option<Arc<gpui::RenderImage>>>> = RefCell::new(HashMap::new());
+    static RASTER: RefCell<crate::lru::Lru<(String, u32), Option<Arc<gpui::RenderImage>>>> = RefCell::new(crate::lru::Lru::new(512));
 }
 
 /// 彩色图标栅格化为 GPUI 位图（BGRA），长边 px 像素，带缓存。
 pub fn raster(name: &str, px: u32) -> Option<Arc<gpui::RenderImage>> {
-    RASTER.with(|m| {
-        m.borrow_mut()
-            .entry((name.to_string(), px))
-            .or_insert_with(|| {
-                let (_, d) = get(name)?;
-                let svg = svg(name, None)?;
-                let opts = resvg::usvg::Options { fontdb: crate::canvas::svg::fontdb(), ..Default::default() };
-                let tree = resvg::usvg::Tree::from_str(&svg, &opts).ok()?;
-                let s = px as f32 / d.w.max(d.h).max(1.);
-                let mut pixmap = resvg::tiny_skia::Pixmap::new(((d.w * s).ceil() as u32).max(1), ((d.h * s).ceil() as u32).max(1))?;
-                resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut pixmap.as_mut());
-                let (w, h) = (pixmap.width(), pixmap.height());
-                let mut bgra = Vec::with_capacity((w * h * 4) as usize);
-                for p in pixmap.pixels() {
-                    let c = p.demultiply();
-                    bgra.extend_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
-                }
-                let buf = image::RgbaImage::from_raw(w, h, bgra)?;
-                Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])))
-            })
-            .clone()
-    })
+    let key = (name.to_string(), px);
+    if let Some(hit) = RASTER.with(|m| m.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let img = (|| {
+        let (_, d) = get(name)?;
+        let svg = svg(name, None)?;
+        let opts = resvg::usvg::Options { fontdb: crate::canvas::svg::fontdb(), ..Default::default() };
+        let tree = resvg::usvg::Tree::from_str(&svg, &opts).ok()?;
+        let s = px as f32 / d.w.max(d.h).max(1.);
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(((d.w * s).ceil() as u32).max(1), ((d.h * s).ceil() as u32).max(1))?;
+        resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut pixmap.as_mut());
+        let (w, h) = (pixmap.width(), pixmap.height());
+        let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+        for p in pixmap.pixels() {
+            let c = p.demultiply();
+            bgra.extend_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
+        }
+        let buf = image::RgbaImage::from_raw(w, h, bgra)?;
+        Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])))
+    })();
+    RASTER.with(|m| m.borrow_mut().insert(key, img.clone()));
+    img
 }
 
 /// 画布上按显示尺寸挑选栅格化精度（2 的幂，32–1024）。

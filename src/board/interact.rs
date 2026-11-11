@@ -1039,32 +1039,7 @@ impl BoardEditor {
                 self.offset = pt(orig.x + f32::from(ev.position.x - start.x), orig.y + f32::from(ev.position.y - start.y));
                 self.drag = Some(Drag::Pan { start, orig });
             }
-            Some(Drag::QuickDot { from, side, start }) => {
-                if dist_px(start, ev.position) > 5. {
-                    // 从圆点拉出连线
-                    self.snapshot();
-                    let (ax, ay) = side.anchor();
-                    // 思维导图节点拉出的是曲线（的「关联线」）
-                    let route = if self.doc.get(from).is_some_and(|e| e.is_mind()) { Route::Curve } else { Route::Elbow };
-                    let el = self.doc.new_el(
-                        ElKind::Connector {
-                            a: End::Bound { el: from, ax, ay },
-                            b: End::Free { x: p.x, y: p.y },
-                            route,
-                            start: Arrow::None,
-                            end: Arrow::Filled,
-                        },
-                        Rect::default(),
-                        Self::dark(cx),
-                    );
-                    let id = el.id;
-                    self.doc.els.push(el);
-                    self.hover_dot = None;
-                    self.drag = Some(Drag::Connect { id });
-                } else {
-                    self.drag = Some(Drag::QuickDot { from, side, start });
-                }
-            }
+            Some(Drag::QuickDot { from, side, start }) => self.mouse_move_quick_dot(ev, cx, from, p, side, start),
             Some(Drag::Dash { life, top, start }) => {
                 if dist_px(start, ev.position) > 4. {
                     // 拖动虚线 = 移动生命线
@@ -1258,35 +1233,7 @@ impl BoardEditor {
                 }
                 self.drag = Some(Drag::Create { start, id });
             }
-            Some(Drag::Marquee { start, .. }) => {
-                let m = Rect::from_points(start, p);
-                let precise = prefs().precise_select;
-                let lk = self.doc.lookup();
-                self.sel = self
-                    .doc
-                    .els
-                    .iter()
-                    .filter(|e| lk.visible(e.id))
-                    .filter(|e| {
-                        let b = BoardDoc::bounds_in(&lk, e);
-                        let inside = b.x >= m.x && b.y >= m.y && b.right() <= m.right() && b.bottom() <= m.bottom();
-                        // 生命线：框到头部或虚线才算碰到，虚线两侧的空白不算
-                        let touch = match super::seq::dash_of(e) {
-                            Some((x, y0, y1)) => super::seq::head_rect(e).intersects(&m) || (x >= m.x && x <= m.right() && m.y <= y1 && m.bottom() >= y0),
-                            None => b.intersects(&m),
-                        };
-                        // 容器只在被完整框住时选中，避免一拖就选上整块背景
-                        if e.is_container() || precise {
-                            inside
-                        } else {
-                            touch
-                        }
-                    })
-                    .map(|e| e.id)
-                    .collect();
-                self.expand_groups();
-                self.drag = Some(Drag::Marquee { start, cur: p });
-            }
+            Some(Drag::Marquee { start, .. }) => self.mouse_move_marquee(p, start),
             Some(Drag::Pen { id, last }) => {
                 if p.dist(last) > 1.5 / zoom {
                     // 用速度模拟压力：越快越细
@@ -1334,6 +1281,58 @@ impl BoardEditor {
             None => {}
         }
         cx.notify();
+    }
+    /// 从 `mouse_move` 拆出。
+    fn mouse_move_quick_dot(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>, from: u64, p: Pt, side: Side, start: Point<Pixels>) {
+        if dist_px(start, ev.position) > 5. {
+            // 从圆点拉出连线
+            self.snapshot();
+            let (ax, ay) = side.anchor();
+            // 思维导图节点拉出的是曲线（的「关联线」）
+            let route = if self.doc.get(from).is_some_and(|e| e.is_mind()) { Route::Curve } else { Route::Elbow };
+            let el = self.doc.new_el(
+                ElKind::Connector { a: End::Bound { el: from, ax, ay }, b: End::Free { x: p.x, y: p.y }, route, start: Arrow::None, end: Arrow::Filled },
+                Rect::default(),
+                Self::dark(cx),
+            );
+            let id = el.id;
+            self.doc.els.push(el);
+            self.hover_dot = None;
+            self.drag = Some(Drag::Connect { id });
+        } else {
+            self.drag = Some(Drag::QuickDot { from, side, start });
+        }
+    }
+
+    /// 从 `mouse_move` 拆出。
+    fn mouse_move_marquee(&mut self, p: Pt, start: Pt) {
+        let m = Rect::from_points(start, p);
+        let precise = prefs().precise_select;
+        let lk = self.doc.lookup();
+        self.sel = self
+            .doc
+            .els
+            .iter()
+            .filter(|e| lk.visible(e.id))
+            .filter(|e| {
+                let b = BoardDoc::bounds_in(&lk, e);
+                let inside = b.x >= m.x && b.y >= m.y && b.right() <= m.right() && b.bottom() <= m.bottom();
+                // 生命线：框到头部或虚线才算碰到，虚线两侧的空白不算
+                let touch = match super::seq::dash_of(e) {
+                    Some((x, y0, y1)) => super::seq::head_rect(e).intersects(&m) || (x >= m.x && x <= m.right() && m.y <= y1 && m.bottom() >= y0),
+                    None => b.intersects(&m),
+                };
+                // 容器只在被完整框住时选中，避免一拖就选上整块背景
+                if e.is_container() || precise {
+                    inside
+                } else {
+                    touch
+                }
+            })
+            .map(|e| e.id)
+            .collect();
+        self.expand_groups();
+        self.drag = Some(Drag::Marquee { start, cur: p });
     }
 
     /// 移动时的对齐吸附：选区包围盒的左 / 中 / 右、上 / 中 / 下贴齐其他元素，并记录参考线。

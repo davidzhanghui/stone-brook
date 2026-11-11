@@ -821,11 +821,14 @@ pub struct Block {
     /// 折叠：子项（缩进更深的后续块 / 标题下的内容）不显示。属于视图状态，不进同步块与模板
     #[serde(default, skip_serializing_if = "is_false")]
     pub collapsed: bool,
+    /// 当前版本不认识的字段（更新版本给已有块加的新字段）：读入时收集，写回时原样带上，不会被旧版本静默丢掉。
+    #[serde(skip)]
+    pub extra: Option<Box<serde_json::Map<String, serde_json::Value>>>,
 }
 
 impl Block {
     pub fn new(kind: BlockKind, text: RichText) -> Self {
-        Block { id: next_id(), kind, indent: 0, align: 0, text, sync: None, num: None, collapsed: false }
+        Block { id: next_id(), kind, indent: 0, align: 0, text, sync: None, num: None, collapsed: false, extra: None }
     }
 
     pub fn text(s: &str) -> Self {
@@ -962,17 +965,25 @@ impl Block {
     }
 
     /// 序列化为 JSON 值（未知块原样写回）。
-    pub fn to_value(&self) -> serde_json::Value {
+    /// 序列化为 JSON 值；失败时返回错误（落盘路径用，不能把块写成 null）。
+    pub fn try_to_value(&self) -> Result<serde_json::Value, serde_json::Error> {
         if let BlockKind::Unknown { raw: Some(raw) } = &self.kind {
-            return raw.clone();
+            return Ok(raw.clone());
         }
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+        let mut v = serde_json::to_value(self)?;
+        if let (Some(extra), Some(obj)) = (&self.extra, v.as_object_mut()) {
+            for (k, x) in extra.iter() {
+                obj.entry(k.clone()).or_insert_with(|| x.clone());
+            }
+        }
+        Ok(v)
     }
 
-    /// 从 JSON 值反序列化；不认识的块降级为 Unknown 并保留原始数据。
+    /// 从 JSON 值反序列化；不认识的块降级为 Unknown 并保留原始数据，认识的块里不认识的字段收进 `extra`。
     pub fn from_value(v: serde_json::Value) -> Block {
         match serde_json::from_value::<Block>(v.clone()) {
             Ok(mut b) => {
+                b.extra = unknown_fields(&b, &v);
                 b.fixup();
                 b
             }
@@ -980,6 +991,21 @@ impl Block {
         }
     }
 }
+
+/// 原始 JSON 里有、但重新序列化后没有的顶层字段。
+/// 只认「重新序列化里不存在的键」：值为默认而被 `skip_serializing_if` 省掉的已知字段也会落进来，
+/// 写回时用 `or_insert` 合并，已知字段的当前值始终优先，因此不会把旧值写回去。
+fn unknown_fields(b: &Block, raw: &serde_json::Value) -> Option<Box<serde_json::Map<String, serde_json::Value>>> {
+    let raw = raw.as_object()?;
+    let known = serde_json::to_value(b).ok()?;
+    let known = known.as_object()?;
+    let extra: serde_json::Map<String, serde_json::Value> =
+        raw.iter().filter(|(k, _)| !known.contains_key(*k) && !KNOWN_OPTIONAL_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    (!extra.is_empty()).then(|| Box::new(extra))
+}
+
+/// `Block` 自身可能被 `skip_serializing_if` 省略的字段：读入时值为默认，不算未知字段。
+const KNOWN_OPTIONAL_KEYS: &[&str] = &["indent", "align", "text", "sync", "num", "collapsed"];
 
 /// 文档内容：块序列，第 0 块固定为 Title。块用 Arc 共享，撤销快照几乎零成本。
 #[derive(Clone, Debug, Default)]
@@ -1007,13 +1033,20 @@ impl DocContent {
         self.blocks.first().map(|b| b.text.text.clone()).unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn to_json(&self) -> String {
-        blocks_to_json_iter(self.blocks.iter().map(|b| &**b))
+        self.try_to_json().unwrap_or_default()
+    }
+
+    /// 序列化文档；失败时返回错误（落盘路径必须用这个，失败就不写，不能把空串写进数据库）。
+    pub fn try_to_json(&self) -> Result<String, serde_json::Error> {
+        encode_blocks(self.blocks.iter().map(|b| &**b))
     }
 
     /// 解析文档 JSON。整体格式错误时返回错误（不能悄悄当成空文档，否则下次保存会把原数据覆盖掉）。
     pub fn try_from_json(s: &str) -> Result<Self, serde_json::Error> {
-        let d: DocJsonRaw = serde_json::from_str(s)?;
+        let mut d: DocJsonRaw = serde_json::from_str(s)?;
+        d.blocks.iter_mut().for_each(crate::assets::refs_in);
         Ok(Self::from_blocks(d.blocks.into_iter().map(Block::from_value).collect()))
     }
 
@@ -1054,23 +1087,46 @@ impl DocContent {
     }
 }
 
-fn blocks_to_json_iter<'a>(blocks: impl Iterator<Item = &'a Block>) -> String {
-    let raw = DocJsonRaw { version: DOC_VERSION, blocks: blocks.map(|b| b.to_value()).collect() };
-    serde_json::to_string(&raw).unwrap_or_default()
+fn encode_blocks<'a>(blocks: impl Iterator<Item = &'a Block>) -> Result<String, serde_json::Error> {
+    let mut raw = DocJsonRaw { version: DOC_VERSION, blocks: blocks.map(|b| b.try_to_value()).collect::<Result<_, _>>()? };
+    raw.blocks.iter_mut().for_each(crate::assets::refs_out);
+    serde_json::to_string(&raw)
 }
 
 /// 剪贴板片段（块数组）的序列化。
 pub fn blocks_to_json(blocks: &[Block]) -> String {
-    blocks_to_json_iter(blocks.iter())
+    encode_blocks(blocks.iter()).unwrap_or_default()
+}
+
+/// 块数组序列化（落盘用：模板、同步块）。
+pub fn try_blocks_to_json(blocks: &[Block]) -> Result<String, serde_json::Error> {
+    encode_blocks(blocks.iter())
 }
 
 pub fn blocks_from_json(s: &str) -> Option<Vec<Block>> {
-    let d: DocJsonRaw = serde_json::from_str(s).ok()?;
+    let mut d: DocJsonRaw = serde_json::from_str(s).ok()?;
+    d.blocks.iter_mut().for_each(crate::assets::refs_in);
     Some(d.blocks.into_iter().map(Block::from_value).collect())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_block_fields_survive_round_trip() {
+        use super::*;
+        // 更新版本给段落块加了新字段 `future`；旧版本读进来再写回，不能丢
+        let raw = serde_json::json!({"type": "text", "text": {"text": "hi"}, "future": {"x": 1}});
+        let mut b = Block::from_value(raw);
+        assert!(matches!(b.kind, BlockKind::Text));
+        b.indent = 2; // 已知字段照常修改
+        let back = b.try_to_value().unwrap();
+        assert_eq!(back["future"], serde_json::json!({"x": 1}));
+        assert_eq!(back["indent"], 2);
+        // 没有未知字段时不带 extra
+        let plain = Block::from_value(Block::text("a").try_to_value().unwrap());
+        assert!(plain.extra.is_none());
+    }
+
     #[test]
     fn table_rect_normalizes_reversed_columns_and_grows_over_merges() {
         // 3 列表格：从 (0,2) 拖到 (1,0)，线性下标 2 → 3，列是反的
@@ -1096,7 +1152,7 @@ mod tests {
         let b = Block::from_value(serde_json::json!({"type": "countdown", "target": 1}));
         assert_eq!(b.kind, BlockKind::Countdown { target: 1, color: 1, notify: false, dur: None });
         // 新字段写出后能读回
-        let round = Block::from_value(b.to_value());
+        let round = Block::from_value(b.try_to_value().unwrap());
         assert_eq!(round.kind, b.kind);
     }
 

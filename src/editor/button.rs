@@ -95,8 +95,8 @@ impl Editor {
 
     /// 关闭浮层后光标落到按钮后面，回到正文编辑。
     fn button_edit_done(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.head = self.clamp(Pos::new((ix + 1).min(self.content.blocks.len() - 1), 0, 0));
-        self.anchor = self.head;
+        self.core.head = self.clamp(Pos::new((ix + 1).min(self.content.blocks.len() - 1), 0, 0));
+        self.core.anchor = self.core.head;
         window.focus(&self.focus);
         cx.notify();
     }
@@ -104,8 +104,8 @@ impl Editor {
     fn button_delete(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.checkpoint(EditKind::Other);
         self.remove_blocks(ix..ix + 1);
-        self.head = self.clamp(Pos::new(ix, 0, 0));
-        self.anchor = self.head;
+        self.core.head = self.clamp(Pos::new(ix, 0, 0));
+        self.core.anchor = self.core.head;
         self.changed(cx);
     }
 
@@ -113,8 +113,8 @@ impl Editor {
     fn button_bar_hover(&mut self, id: u64, over: bool, cx: &mut Context<Self>) {
         self.button_bar_epoch = self.button_bar_epoch.wrapping_add(1);
         if over {
-            if self.button_bar != Some(id) {
-                self.button_bar = Some(id);
+            if self.sess.button_bar != Some(id) {
+                self.sess.button_bar = Some(id);
                 cx.notify();
             }
             return;
@@ -123,8 +123,8 @@ impl Editor {
         cx.spawn(async move |this: WeakEntity<Editor>, cx: &mut AsyncApp| {
             cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
             this.update(cx, |this, cx| {
-                if this.button_bar_epoch == epoch && this.button_bar == Some(id) {
-                    this.button_bar = None;
+                if this.button_bar_epoch == epoch && this.sess.button_bar == Some(id) {
+                    this.sess.button_bar = None;
                     cx.notify();
                 }
             })
@@ -257,7 +257,7 @@ impl Editor {
                     .relative()
                     .child(chip)
                     // 悬停状态由 button_bar 记录（group_hover 只认父元素自身范围，够不到上方的工具栏）
-                    .when(!editing && self.button_bar == Some(blk.id), |d| d.child(toolbar)),
+                    .when(!editing && self.sess.button_bar == Some(blk.id), |d| d.child(toolbar)),
             )
             // anchored 取父元素原点：套一个贴在按钮下沿的零高占位，浮层就出现在按钮正下方
             .when(editing, |d| d.child(div().w_full().h(px(0.)).child(self.render_button_popover(t, window, cx))))
