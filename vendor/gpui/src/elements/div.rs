@@ -1064,6 +1064,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// 只响应对应轴向的滚轮增量：横向滚动容器不会把纵向滚轮吃掉（仍交给外层滚动文档）。
+    fn restrict_scroll_to_axis(mut self) -> Self {
+        self.interactivity().base_style.restrict_scroll_to_axis = Some(true);
+        self
+    }
+
     /// Set the space to be reserved for rendering the scrollbar.
     ///
     /// This will only affect the layout of the element when overflow for this element is set to

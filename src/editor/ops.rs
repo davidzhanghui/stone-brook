@@ -72,7 +72,7 @@ pub fn slash_items() -> Vec<SlashItem> {
         it("基础", Tx("H4"), 0x3b6cf6, "四级标题", "####", "h4 heading bt biaoti", SlashAction::Kind(Heading { level: 4 })),
         it("基础", Svg("list-ordered"), 0x5b5bd6, "有序列表", "1.", "ol ordered number list yxlb liebiao", SlashAction::Kind(Ordered)),
         it("基础", Svg("list"), 0x5b5bd6, "无序列表", "-", "ul bullet list wxlb liebiao", SlashAction::Kind(Bullet)),
-        it("基础", Svg("braces"), 0x2ea121, "代码块", "```", "code dmk daima", SlashAction::Kind(Code { lang: "Plain Text".into() })),
+        it("基础", Svg("braces"), 0x2ea121, "代码块", "```", "code dmk daima", SlashAction::Kind(Code { lang: "Plain Text".into(), wrap: true })),
         it("基础", Svg("quote"), 0x3b6cf6, "引用", ">", "quote yy yinyong", SlashAction::Kind(Quote)),
         it("基础", Svg("divider"), 0xf5a339, "分隔线", "---", "hr divider line fgx fenge fengexian fenge", SlashAction::Divider),
         it("基础", Svg("link"), 0x3b6cf6, "链接", "⌘K", "link lj lianjie url chaolianjie", SlashAction::Link),
@@ -290,7 +290,7 @@ impl Editor {
             "[]" | "[ ]" | "【】" => BlockKind::Todo { checked: false },
             "[x]" | "[X]" => BlockKind::Todo { checked: true },
             ">" | "》" => BlockKind::Quote,
-            "```" | "···" => BlockKind::Code { lang: "Plain Text".into() },
+            "```" | "···" => BlockKind::Code { lang: "Plain Text".into(), wrap: true },
             p if p.len() >= 2
                 && (p.ends_with('.') || p.ends_with('、') || p.ends_with(')'))
                 && p.trim_end_matches(['.', '、', ')']).chars().all(|c| c.is_ascii_digit())
@@ -938,7 +938,7 @@ impl Editor {
             BlockKind::Text if blk.text.text.starts_with("```") && h.offset == blk.text.len() => {
                 let lang = normalize_lang(&blk.text.text[3..]);
                 let b = self.block_mut(h.block);
-                b.kind = BlockKind::Code { lang };
+                b.kind = BlockKind::Code { lang, wrap: true };
                 b.text = RichText::default();
                 self.core.head = Pos::new(h.block, 0, 0);
             }
@@ -1313,7 +1313,7 @@ impl Editor {
         self.set_kind(BlockKind::Quote, cx)
     }
     pub fn set_code(&mut self, _: &SetCode, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_kind(BlockKind::Code { lang: "Plain Text".into() }, cx)
+        self.set_kind(BlockKind::Code { lang: "Plain Text".into(), wrap: true }, cx)
     }
 
     pub fn toggle_todo_at(&mut self, b: usize, cx: &mut Context<Self>) {
@@ -1432,10 +1432,84 @@ impl Editor {
 
     pub fn set_code_lang(&mut self, b: usize, lang: &str, cx: &mut Context<Self>) {
         self.checkpoint(EditKind::Other);
-        if let BlockKind::Code { lang: l } = &mut self.block_mut(b).kind {
+        if let BlockKind::Code { lang: l, .. } = &mut self.block_mut(b).kind {
             *l = lang.to_string();
         }
         self.pop.lang_menu = None;
+        self.changed(cx);
+    }
+
+    /// 语言菜单当前输入的搜索词。
+    fn lang_query(&self, cx: &App) -> String {
+        self.pop.lang_search.as_ref().map(|s| s.input.read(cx).text()).unwrap_or_default()
+    }
+
+    /// 打开语言选择浮层：搜索框自动获得焦点，↑↓ 选择、回车确认、Esc 取消。
+    pub fn open_lang_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // on_mouse_down_out 会在按下时先把浮层关掉；同一次点击（抬起触发 on_click）不再重新打开，
+        // 这样点按钮本身也能「开 → 关」。
+        if self.pop.lang_closed_at.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250)) {
+            return;
+        }
+        if self.pop.lang_menu == Some(ix) {
+            self.close_lang_menu(window, cx);
+            return;
+        }
+        let input = cx.new(|cx| LineInput::new("搜索语言", cx));
+        let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Submit { .. } => {
+                let q = this.lang_query(cx);
+                let langs = crate::highlight::filter_langs(&q);
+                if let Some(lang) = langs.get(this.pop.lang_sel).or_else(|| langs.first()).copied() {
+                    this.set_code_lang(ix, lang, cx);
+                }
+                this.close_lang_menu(window, cx);
+            }
+            InputEvent::Cancel => this.close_lang_menu(window, cx),
+            InputEvent::Up => {
+                this.pop.lang_sel = this.pop.lang_sel.saturating_sub(1);
+                cx.notify();
+            }
+            InputEvent::Down => {
+                let n = crate::highlight::filter_langs(&this.lang_query(cx)).len();
+                if this.pop.lang_sel + 1 < n {
+                    this.pop.lang_sel += 1;
+                }
+                cx.notify();
+            }
+            InputEvent::Changed => {
+                this.pop.lang_sel = 0;
+                cx.notify();
+            }
+        });
+        window.focus(&input.focus_handle(cx));
+        self.pop.lang_search = Some(LangSearch { input, _sub: sub });
+        self.pop.lang_menu = Some(ix);
+        self.pop.lang_sel = 0;
+        cx.notify();
+    }
+
+    /// 点选一种语言：改块的语言并关闭浮层，焦点回到正文。
+    pub fn pick_code_lang(&mut self, b: usize, lang: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_code_lang(b, lang, cx);
+        self.close_lang_menu(window, cx);
+    }
+
+    /// 关闭语言浮层并释放搜索框。
+    pub fn close_lang_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pop.lang_menu = None;
+        self.pop.lang_search = None;
+        self.pop.lang_closed_at = Some(std::time::Instant::now());
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// 代码块自动换行开关（与飞书一致：关掉后长行单行显示，可横向滚动）。
+    pub fn set_code_wrap(&mut self, b: usize, wrap: bool, cx: &mut Context<Self>) {
+        self.checkpoint(EditKind::Other);
+        if let BlockKind::Code { wrap: w, .. } = &mut self.block_mut(b).kind {
+            *w = wrap;
+        }
         self.changed(cx);
     }
 
@@ -1974,6 +2048,7 @@ impl Editor {
             || self.pop.ordered_menu.take().is_some()
             || self.pop.mention.take().is_some()
         {
+            self.pop.lang_search = None;
             cx.notify();
         } else if self.pop.link_edit.is_some() {
             self.pop.link_edit = None;

@@ -17,7 +17,7 @@ impl Editor {
             ("1.", BlockKind::Ordered),
             ("☑", BlockKind::Todo { checked: false }),
             ("❝", BlockKind::Quote),
-            ("</>", BlockKind::Code { lang: "Plain Text".into() }),
+            ("</>", BlockKind::Code { lang: "Plain Text".into(), wrap: true }),
             ("💡", BlockKind::Callout { emoji: "💡".into(), color: 5 }),
             ("✎", BlockKind::Notes),
         ];

@@ -29,6 +29,7 @@ impl Editor {
         self.pop.slash = None;
         self.pop.block_menu = None;
         self.pop.lang_menu = None;
+        self.pop.lang_search = None;
         self.pop.ordered_menu = None;
         self.pop.link_edit = None;
         self.pop.tb_menu = None;

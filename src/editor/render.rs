@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::convert::{bullet_glyph, ordered_label};
-use crate::highlight::{highlight_cached, Tok, LANGS};
+use crate::highlight::{highlight_cached, Tok};
 use crate::model::{BlockKind, Marks, RichText};
 use crate::theme::{theme, Theme};
 use crate::ui::{icon, Tooltip};
@@ -16,6 +16,7 @@ pub fn content_w() -> f32 {
         760.
     }
 }
+/// 左侧装订线：悬停时依次放折叠三角、块类型图标、拖动手柄（各 22px，边缘略重叠）。
 pub(super) const GUTTER: f32 = 64.;
 const INDENT_W: f32 = 26.;
 /// 供图片宽度计算复用。
@@ -45,11 +46,26 @@ pub struct SlotSpec {
     pub strike: bool,
     pub placeholder: Option<SharedString>,
     pub lang: Option<String>,
+    /// 不自动换行（代码块关闭换行时）：按内容固有宽度排成单行，由外层横向滚动
+    pub nowrap: bool,
+    /// 关闭换行时的横向滚动句柄：光标移出可视区时自动跟过去
+    pub hscroll: Option<ScrollHandle>,
 }
 
 impl SlotSpec {
     pub fn body(t: &Theme) -> Self {
-        SlotSpec { size: body_size(), line_h: body_lh(), weight: FontWeight::NORMAL, mono: false, color: t.text, strike: false, placeholder: None, lang: None }
+        SlotSpec {
+            size: body_size(),
+            line_h: body_lh(),
+            weight: FontWeight::NORMAL,
+            mono: false,
+            color: t.text,
+            strike: false,
+            placeholder: None,
+            lang: None,
+            nowrap: false,
+            hscroll: None,
+        }
     }
 }
 
@@ -95,6 +111,53 @@ fn spacing(kind: &BlockKind) -> (f32, f32) {
 
 fn heading_size(level: u8) -> f32 {
     [26., 22., 19., 17., 16., 15.][(level.clamp(1, 6) - 1) as usize]
+}
+
+/// 块类型图标的配色（与斜杠菜单同一套色板）。
+fn kind_icon_color(kind: &BlockKind) -> u32 {
+    match kind {
+        BlockKind::Title | BlockKind::Text | BlockKind::Heading { .. } | BlockKind::Quote | BlockKind::Html { .. } => 0x3b6cf6,
+        BlockKind::Bullet | BlockKind::Ordered | BlockKind::Todo { .. } | BlockKind::Columns { .. } | BlockKind::Toc => 0x5b5bd6,
+        BlockKind::Code { .. } | BlockKind::Embed { .. } => 0x2ea121,
+        BlockKind::Callout { .. } | BlockKind::Divider | BlockKind::Image { .. } | BlockKind::Countdown { .. } => 0xf5a339,
+        BlockKind::File { .. } | BlockKind::Video { .. } => 0x0ea5e9,
+        BlockKind::Table { .. } | BlockKind::LinkCard { .. } => 0x14b8a6,
+        BlockKind::Notes => 0x8f959e,
+        BlockKind::Math => 0x1f2329,
+        BlockKind::Diagram { .. } | BlockKind::Timeline { .. } => 0x8b5cf6,
+        BlockKind::Button { .. } => 0x5b5bd6,
+        BlockKind::Unknown { .. } => 0x8f959e,
+    }
+}
+
+/// 块类型图标：鼠标悬停块时显示在左上角（菜单 / 拖动柄左边）。
+fn kind_icon_name(kind: &BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Title | BlockKind::Text | BlockKind::Heading { .. } => "type",
+        BlockKind::Bullet => "list",
+        BlockKind::Ordered => "list-ordered",
+        BlockKind::Todo { .. } => "square-check",
+        BlockKind::Quote => "quote",
+        BlockKind::Code { .. } => "braces",
+        BlockKind::Callout { .. } => "callout",
+        BlockKind::Divider => "divider",
+        BlockKind::Notes => "comment",
+        BlockKind::Image { .. } => "image",
+        BlockKind::Table { .. } => "table",
+        BlockKind::Columns { .. } => "columns",
+        BlockKind::File { .. } => "file",
+        BlockKind::Toc => "outline",
+        BlockKind::Countdown { .. } => "clock",
+        BlockKind::Button { .. } => "square",
+        BlockKind::Timeline { .. } => "timeline",
+        BlockKind::Math => "sigma",
+        BlockKind::Diagram { .. } => "workflow",
+        BlockKind::Html { .. } => "code-xml",
+        BlockKind::LinkCard { .. } => "link",
+        BlockKind::Video { .. } => "video",
+        BlockKind::Embed { .. } => "layout",
+        BlockKind::Unknown { .. } => "file",
+    }
 }
 
 /// 把富文本 + 各种叠加层（选区、输入法组字、查找、语法高亮）合成为 TextRun 序列。
@@ -364,12 +427,19 @@ impl Editor {
         let sel_start_offset = m2d(self.sel().0.offset.min(rt.len()));
         let caret_color = t.cursor;
         let caret_w = if spec.size > 20. { px(2.5) } else { px(2.) };
+        // 光标只比字高一点，不占满整行（行距 1.74 倍，占满会显得空行里一根很高的柱子）
+        let caret_h = (spec.size * 1.2).round();
         let line_h = spec.line_h;
+        // 关闭换行的代码块：光标移动时把它带回横向可视区
+        let hscroll = spec.hscroll.clone();
+        let follow = focused && is_head && !has_sel && !self.sess.read_only;
+        let caret_block = self.content.blocks.get(b).map(|x| x.id);
 
         div()
             .relative()
-            .w_full()
+            .when(!spec.nowrap, |d| d.w_full())
             .min_w(px(0.))
+            .when(spec.nowrap, |d| d.whitespace_nowrap())
             .text_size(px(spec.size))
             .line_height(px(spec.line_h))
             // 单元格 / 分栏自带对齐；普通块 align 为 0，继承 Block::align
@@ -379,7 +449,7 @@ impl Editor {
             .child(styled)
             .child(
                 canvas(
-                    move |_, _, _| {
+                    move |_, window, _| {
                         let mut f = frame.borrow_mut();
                         f.layouts.insert(slot, layout.clone());
                         match &map {
@@ -393,10 +463,35 @@ impl Editor {
                         let mut quad = None;
                         if let Some(o) = caret {
                             if let Some(p) = layout.position_for_index(o) {
-                                let r = Bounds::new(p, size(caret_w, layout.line_height()));
+                                let lh = layout.line_height();
+                                let h = px(caret_h).min(lh);
+                                let r = Bounds::new(point(p.x, p.y + (lh - h) / 2.), size(caret_w, h));
                                 f.cursor = Some(r);
                                 if show_caret {
                                     quad = Some(r);
+                                }
+                                // 只在光标位置变化时跟随：用户手动横向滚动不会被弹回
+                                if follow {
+                                    if let (Some(hs), Some(cid)) = (hscroll.as_ref(), caret_block) {
+                                        if f.code_caret_last != Some((cid, o)) {
+                                            f.code_caret_last = Some((cid, o));
+                                            let vb = hs.bounds();
+                                            if vb.size.width > px(0.) {
+                                                let pad = px(16.);
+                                                let mut off = hs.offset();
+                                                if p.x < vb.left() + pad {
+                                                    off.x += vb.left() + pad - p.x;
+                                                } else if p.x > vb.right() - pad {
+                                                    off.x -= p.x - (vb.right() - pad);
+                                                }
+                                                off.x = off.x.clamp(-hs.max_offset().width, px(0.));
+                                                if off.x != hs.offset().x {
+                                                    hs.set_offset(off);
+                                                    window.refresh();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -504,7 +599,7 @@ impl Editor {
             }
             BlockKind::Notes => self.render_block_notes(ix, cx, &blk, focused, &t),
             BlockKind::Callout { emoji, color } => self.render_block_callout(ix, cx, &blk, color, emoji, focused, &t),
-            BlockKind::Code { lang } => self.render_code(ix, &blk, lang, focused, &t, cx),
+            BlockKind::Code { lang, wrap } => self.render_code(ix, &blk, lang, *wrap, focused, &t, cx),
             BlockKind::Divider => {
                 let selected = self.block_selected(ix) && focused;
                 div()
@@ -547,7 +642,7 @@ impl Editor {
         let handle_top = if is_table { pt + 16. + 7. } else { pt + (row_lh - 22.) / 2. };
         let handle = div()
             .absolute()
-            .left(px(GUTTER + indent_px - 28. - if is_table { 16. } else { 0. }))
+            .left(px(GUTTER + indent_px - 22. - if is_table { 16. } else { 0. }))
             .top(px(handle_top.max(0.)))
             .child(
                 div()
@@ -577,12 +672,40 @@ impl Editor {
                         .with_priority(2),
                 )
             });
+        // 块类型图标（飞书同款）：悬停时与拖动手柄一起出现在左上角，点击打开块菜单
+        let kind_badge = (ix > 0).then(|| {
+            div().absolute().left(px(GUTTER + indent_px - 43. - if is_table { 16. } else { 0. })).top(px(handle_top.max(0.))).child(
+                div()
+                    .id(("kind-ic", blk.id as usize))
+                    .size(px(22.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .when(!menu_open, |d| d.invisible().when(!self.sess.read_only, |d| d.group_hover("blk", |s| s.visible())))
+                    .when(menu_open, |d| d.bg(t.hover))
+                    .hover(|s| s.bg(t.hover))
+                    .child({
+                        let col: gpui::Hsla = gpui::rgb(kind_icon_color(&blk.kind)).into();
+                        let col = if t.dark { col.blend(gpui::hsla(0., 0., 1., 0.25)) } else { col };
+                        icon(kind_icon_name(&blk.kind), 14., col)
+                    })
+                    // 阅读模式：不能打开块菜单
+                    .when(!self.sess.read_only, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| {
+                            this.pop.block_menu = if this.pop.block_menu == Some(ix) { None } else { Some(ix) };
+                            cx.notify();
+                        }))
+                    }),
+            )
+        });
 
         let n_hidden = if blk.collapsed { crate::editor::fold::subtree(&self.content.blocks, ix).len() } else { 0 };
-        // 折叠三角：有子项的块悬停显示，收起时常显
+        // 折叠三角：有子项的块悬停显示，收起时常显（排在类型图标左边）
         let fold = (ix > 0 && !self.sess.read_only && self.has_children(ix)).then(|| {
             let collapsed = blk.collapsed;
-            div().absolute().left(px(GUTTER + indent_px - 50. - if is_table { 16. } else { 0. })).top(px(handle_top.max(0.))).child(
+            div().absolute().left(px(GUTTER + indent_px - 64. - if is_table { 16. } else { 0. })).top(px(handle_top.max(0.))).child(
                 div()
                     .id(("fold", blk.id as usize))
                     .size(px(22.))
@@ -681,6 +804,7 @@ impl Editor {
                     .pt(px(pt))
                     .pb(px(pb))
                     .when(ix > 0, |d| d.child(handle))
+                    .children(kind_badge)
                     .children(fold)
                     .child(block_recorder)
                     .when(cm_active, |d| {
@@ -916,18 +1040,51 @@ impl Editor {
             .into_any_element()
     }
 
-    fn render_code(&self, ix: usize, blk: &crate::model::Block, lang: &str, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let spec = SlotSpec { size: 13.5, line_h: 22., mono: true, lang: Some(lang.to_string()), ..SlotSpec::body(t) };
+    fn render_code(&self, ix: usize, blk: &crate::model::Block, lang: &str, wrap: bool, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // 关闭换行时的横向滚动句柄（按块保存）
+        let scroll = (!wrap)
+            .then(|| self.caches.code_scroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone());
+        let spec = SlotSpec {
+            size: 13.5,
+            line_h: 22.,
+            mono: true,
+            lang: Some(lang.to_string()),
+            nowrap: !wrap,
+            hscroll: scroll.as_ref().map(|(h, _)| h.clone()),
+            ..SlotSpec::body(t)
+        };
         let code = blk.text.text.clone();
         let lang_open = self.pop.lang_menu == Some(ix);
         let lang_label = lang.to_string();
+        // 飞书同款：默认无边框；鼠标所在块、或正在编辑的块（且此时鼠标不在别的代码块上）显示强调色边框。
+        // 这样同一时刻最多只有一个代码块带边框。
+        let hovered = self.sess.hover_code == Some(blk.id);
+        let editing = focused && self.core.head.block == ix;
+        let bordered = hovered || (editing && self.sess.hover_code.is_none());
+        let code_id = blk.id;
+        let lang_query = if lang_open { self.pop.lang_search.as_ref().map(|s| s.input.read(cx).text()).unwrap_or_default() } else { String::new() };
+        let lang_items: Vec<&'static str> = crate::highlight::filter_langs(&lang_query);
+        let lang_sel = self.pop.lang_sel.min(lang_items.len().saturating_sub(1));
+        let lang_input = self.pop.lang_search.as_ref().map(|s| s.input.clone());
         div()
+            .id(("code-blk", blk.id as usize))
             .group("code")
             .w_full()
             .rounded(px(8.))
             .bg(t.code_bg)
             .border_1()
-            .border_color(t.border)
+            .border_color(if bordered { t.accent } else { gpui::transparent_black() })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    if this.sess.hover_code != Some(code_id) {
+                        this.sess.hover_code = Some(code_id);
+                        cx.notify();
+                    }
+                } else if this.sess.hover_code == Some(code_id) {
+                    this.sess.hover_code = None;
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .flex()
@@ -954,10 +1111,7 @@ impl Editor {
                                     .hover(|s| s.bg(t.hover))
                                     .child(lang_label)
                                     .child(icon("chevron-down", 12., t.text_muted))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.pop.lang_menu = if this.pop.lang_menu == Some(ix) { None } else { Some(ix) };
-                                        cx.notify();
-                                    })),
+                                    .on_click(cx.listener(move |this, _, window, cx| this.open_lang_menu(ix, window, cx))),
                             )
                             .when(lang_open, |d| {
                                 d.child(
@@ -966,9 +1120,9 @@ impl Editor {
                                             div()
                                                 .id("lang-menu")
                                                 .occlude()
-                                                .w(px(160.))
-                                                .max_h(px(300.))
-                                                .overflow_y_scroll()
+                                                .w(px(220.))
+                                                .flex()
+                                                .flex_col()
                                                 .p_1()
                                                 .bg(t.panel_bg)
                                                 .border_1()
@@ -976,22 +1130,42 @@ impl Editor {
                                                 .rounded(px(8.))
                                                 .shadow_lg()
                                                 .text_size(px(13.))
-                                                .children(LANGS.iter().map(|l| {
-                                                    let l = *l;
+                                                // 搜索框：输入即过滤（↑↓ 选择，回车确认，Esc 取消）
+                                                .child(
                                                     div()
-                                                        .id(l)
-                                                        .px_2()
-                                                        .py(px(5.))
-                                                        .rounded(px(4.))
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.bg(t.hover))
-                                                        .child(l)
-                                                        .on_click(cx.listener(move |this, _, _, cx| this.set_code_lang(ix, l, cx)))
-                                                }))
-                                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                                    this.pop.lang_menu = None;
-                                                    cx.notify();
-                                                })),
+                                                        .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .px_1()
+                                                        .py(px(3.))
+                                                        .child(icon("search", 13., t.text_muted))
+                                                        .when_some(lang_input, |d, input| d.child(input)),
+                                                )
+                                                .child(div().h(px(1.)).mx_1().my_1().bg(t.border))
+                                                .child(
+                                                    div()
+                                                        .id("lang-list")
+                                                        .max_h(px(240.))
+                                                        .overflow_y_scroll()
+                                                        .when(lang_items.is_empty(), |d| {
+                                                            d.px_2().py_2().text_color(t.text_muted).child(crate::i18n::tr("没有匹配的语言"))
+                                                        })
+                                                        .children(lang_items.iter().enumerate().map(|(i, l)| {
+                                                            let l = *l;
+                                                            div()
+                                                                .id(("lang-opt", i))
+                                                                .px_2()
+                                                                .py(px(5.))
+                                                                .rounded(px(4.))
+                                                                .cursor_pointer()
+                                                                .when(i == lang_sel, |d| d.bg(t.hover))
+                                                                .hover(|s| s.bg(t.hover))
+                                                                .child(l)
+                                                                .on_click(cx.listener(move |this, _, window, cx| this.pick_code_lang(ix, l, window, cx)))
+                                                        })),
+                                                )
+                                                .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_lang_menu(window, cx))),
                                         ),
                                     )
                                     .with_priority(2),
@@ -1000,35 +1174,86 @@ impl Editor {
                     )
                     .child(
                         div()
-                            .id(("copy", blk.id as usize))
                             .flex()
+                            .flex_row()
                             .items_center()
                             .gap_1()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(4.))
-                            .text_size(px(12.))
-                            .text_color(t.text_muted)
-                            .cursor_pointer()
-                            .invisible()
-                            .group_hover("code", |s| s.visible())
-                            .hover(|s| s.bg(t.hover))
-                            .child(icon("copy", 12., t.text_muted))
-                            .child(crate::i18n::tr("复制"))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                cx.emit(EditorEvent::Toast("代码已复制".into()));
-                            })),
+                            // 自动换行开关：关闭换行后常显（否则长行被横向裁切，用户找不到入口）
+                            .child(
+                                div()
+                                    .id(("wrap", blk.id as usize))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .px(px(6.))
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .text_size(px(12.))
+                                    .text_color(t.text_muted)
+                                    .cursor_pointer()
+                                    .when(wrap, |d| d.invisible().group_hover("code", |s| s.visible()))
+                                    .hover(|s| s.bg(t.hover))
+                                    .child(icon("wrap", 12., t.text_muted))
+                                    .child(if wrap { crate::i18n::tr("取消自动换行") } else { crate::i18n::tr("自动换行") })
+                                    // 阅读模式不能改文档
+                                    .when(!self.sess.read_only, |d| d.on_click(cx.listener(move |this, _, _, cx| this.set_code_wrap(ix, !wrap, cx)))),
+                            )
+                            .child(
+                                div()
+                                    .id(("copy", blk.id as usize))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .px(px(6.))
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .text_size(px(12.))
+                                    .text_color(t.text_muted)
+                                    .cursor_pointer()
+                                    .invisible()
+                                    .group_hover("code", |s| s.visible())
+                                    .hover(|s| s.bg(t.hover))
+                                    .child(icon("copy", 12., t.text_muted))
+                                    .child(crate::i18n::tr("复制"))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                        cx.emit(EditorEvent::Toast("代码已复制".into()));
+                                    })),
+                            ),
                     ),
             )
-            .child(
+            .child(if wrap {
                 div()
                     .px(px(16.))
                     .pt(px(4.))
                     .pb(px(12.))
                     .child(self.render_slot(ix, 0, &blk.text, spec, focused, t))
-                    .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
-            )
+                    .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx))
+                    .into_any_element()
+            } else {
+                // 关闭换行：按内容固有宽度排版，放进横向滚动容器（尾部一行自定义滚动条）
+                let (handle, drag) = scroll.clone().unwrap();
+                div()
+                    .relative()
+                    .w_full()
+                    .child(
+                        div()
+                            .id(("code-scroll", blk.id as usize))
+                            .flex()
+                            .flex_row()
+                            .overflow_x_scroll()
+                            .restrict_scroll_to_axis()
+                            .track_scroll(&handle)
+                            .px(px(16.))
+                            .pt(px(4.))
+                            .pb(px(12.))
+                            .child(
+                                self.render_slot(ix, 0, &blk.text, spec, focused, t).flex_none().on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
+                            ),
+                    )
+                    .child(crate::ui::hscrollbar(handle, drag, t.text_muted))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 

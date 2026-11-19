@@ -267,6 +267,26 @@ impl Editor {
                     this.pop.tb_menu = None;
                     this.start_comment(b, ev.position, window, cx);
                 }),
+            ))
+            .child(sep())
+            .child(btn("tb-copy", "copy", false, "复制 (⌘ + C)").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.pop.tb_menu = None;
+                    this.copy(&Copy, window, cx);
+                    cx.emit(EditorEvent::Toast(crate::i18n::tr("已复制").into()));
+                    cx.notify();
+                }),
+            ))
+            .child(btn("tb-cut", "scissors", false, "剪切 (⌘ + X)").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.pop.tb_menu = None;
+                    this.cut(&Cut, window, cx);
+                    cx.notify();
+                }),
             ));
 
         // 下拉面板通用外壳与菜单行
@@ -362,9 +382,9 @@ impl Editor {
                         .child(item(10, ic_lead("square-check", same(&BlockKind::Todo { checked: false }), false), "任务", BlockKind::Todo { checked: false }))
                         .child(item(
                             11,
-                            ic_lead("braces", same(&BlockKind::Code { lang: String::new() }), false),
+                            ic_lead("braces", same(&BlockKind::Code { lang: String::new(), wrap: true }), false),
                             "代码块",
-                            BlockKind::Code { lang: String::new() },
+                            BlockKind::Code { lang: String::new(), wrap: true },
                         ))
                         .child(menu_sep())
                         .child(item(12, ic_lead("quote", same(&BlockKind::Quote), false), "引用", BlockKind::Quote))

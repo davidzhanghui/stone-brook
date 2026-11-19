@@ -54,6 +54,26 @@ actions!(
     ]
 );
 
+/// 文档副本：块的运行期 id 在加载时重新分配；嵌入对象（画板 / 电子表格 / 多维表格…）
+/// 逐个深拷贝，不然副本和原件改的是同一个对象。标题加「副本」。
+fn duplicate_content(mut c: DocContent) -> DocContent {
+    for b in c.blocks.iter_mut() {
+        if let BlockKind::Embed { id, .. } = &b.kind {
+            if let Some(n) = crate::objects::duplicate(id) {
+                if let BlockKind::Embed { id, .. } = &mut std::sync::Arc::make_mut(b).kind {
+                    *id = n;
+                }
+            }
+        }
+    }
+    if let Some(t) = c.blocks.first_mut() {
+        let t = std::sync::Arc::make_mut(t);
+        let title = format!("{} 副本", t.text.text);
+        t.text = crate::model::RichText::plain(title);
+    }
+    c
+}
+
 struct Switcher {
     input: Entity<LineInput>,
     results: Vec<(String, String, String)>,
@@ -551,22 +571,7 @@ impl Workspace {
             }
             EditorEvent::DuplicateDoc => {
                 let content = editor.read(cx).content.clone();
-                let mut c = content;
-                for b in c.blocks.iter_mut() {
-                    if let BlockKind::Embed { id, .. } = &b.kind {
-                        if let Some(n) = crate::objects::duplicate(id) {
-                            if let BlockKind::Embed { id, .. } = &mut std::sync::Arc::make_mut(b).kind {
-                                *id = n;
-                            }
-                        }
-                    }
-                }
-                if let Some(t) = c.blocks.first_mut() {
-                    let t = std::sync::Arc::make_mut(t);
-                    let title = format!("{} 副本", t.text.text);
-                    t.text = crate::model::RichText::plain(title);
-                }
-                this.pending_new_doc = Some(c);
+                this.pending_new_doc = Some(duplicate_content(content));
                 cx.notify();
             }
             EditorEvent::PickTemplate => {
@@ -867,6 +872,22 @@ impl Workspace {
     fn new_sub_doc(&mut self, _: &NewSubDoc, window: &mut Window, cx: &mut Context<Self>) {
         let parent = self.current.clone();
         self.create_doc(Some(parent), DocContent::new_empty(""), window, cx);
+    }
+
+    /// 复制一篇文档（副本放在原文档同一层级，并打开副本）。
+    fn duplicate_doc_id(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.save_now(cx));
+        let content = if id == self.current {
+            self.editor.read(cx).content.clone()
+        } else {
+            match self.store.load(&id) {
+                Some((c, _)) => c,
+                None => return,
+            }
+        };
+        let parent = self.docs.iter().find(|d| d.id == id).and_then(|d| d.parent.clone());
+        self.create_doc(parent, duplicate_content(content), window, cx);
+        self.show_toast(crate::i18n::tr("已创建副本").into(), cx);
     }
 
     fn trash_doc_id(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1299,7 +1320,7 @@ impl Workspace {
             let open = self.expanded.contains(&id);
             let active = id == self.current;
             let title: SharedString = if d.title.trim().is_empty() { "未命名文档".into() } else { d.title.clone().into() };
-            let (id1, id2, id3, id4) = (id.clone(), id.clone(), id.clone(), id.clone());
+            let (id1, id2, id3, id4, id5) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
             out.push(
                 div()
                     .id(SharedString::from(format!("doc-{id}")))
@@ -1368,6 +1389,22 @@ impl Workspace {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.create_doc(Some(id2.clone()), DocContent::new_empty(""), window, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("dup-{id}")))
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.))
+                                    .hover(|s| s.bg(t.hover))
+                                    .child(icon("copy", 13., t.text_secondary))
+                                    .tooltip(|_, cx| cx.new(|_| Tooltip(crate::i18n::tr("创建副本").into())).into())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.duplicate_doc_id(id5.clone(), window, cx);
                                     })),
                             )
                             .child(
@@ -1794,6 +1831,11 @@ impl Workspace {
             .text_size(px(13.))
             .text_color(t.text)
             .child(item("m-sub", "plus", "新建子文档", crate::shortcuts::hint("stonebrook::NewSubDoc", cx)).on_click(act!(NewSubDoc)))
+            .child(item("m-dup-doc", "copy", "创建副本", String::new()).on_click(cx.listener(|this, _, w, cx| {
+                this.more_menu = false;
+                let id = this.current.clone();
+                this.duplicate_doc_id(id, w, cx);
+            })))
             .child(item("m-img", "image", "插入图片…", String::new()).on_click(cx.listener(|this, _, w, cx| {
                 this.more_menu = false;
                 this.editor.update(cx, |e, cx| e.pick_images(w, cx));

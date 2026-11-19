@@ -500,3 +500,7 @@ LaTeX · 支持 KaTeX 全部语法	LaTeX · full KaTeX syntax
 自动更新	Automatic updates
 每天检查一次，有新版本自动下载，退出时自动安装（需允许联网）	Checks once a day, downloads new versions automatically, and installs them when you quit (requires network access)
 更新	Updates
+自动换行	Wrap lines
+取消自动换行	Unwrap lines
+搜索语言	Search languages
+没有匹配的语言	No matching language

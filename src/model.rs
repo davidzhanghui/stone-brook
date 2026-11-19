@@ -549,6 +549,9 @@ pub enum BlockKind {
     Quote,
     Code {
         lang: String,
+        /// 自动换行：true 时长行折行显示，false 时单行显示并可横向滚动（默认换行，与旧数据一致）
+        #[serde(default = "is_true_default", skip_serializing_if = "is_true")]
+        wrap: bool,
     },
     Callout {
         emoji: String,

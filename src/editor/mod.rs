@@ -166,6 +166,8 @@ struct Snapshot {
 pub struct FrameInfo {
     pub layouts: HashMap<(usize, usize), TextLayout>,
     pub voids: HashMap<usize, Bounds<Pixels>>,
+    /// 上次已做过横向跟随光标的 (块 id, 字节偏移)：位置没变就不再调整，避免手动滚动被弹回
+    pub code_caret_last: Option<(u64, usize)>,
     pub cursor: Option<Bounds<Pixels>>,
     pub sel_start: Option<Point<Pixels>>,
     /// 文本绘图预览：块序号 → (视图变换, 场景)，用于拖动节点
@@ -274,6 +276,12 @@ pub struct LinkEdit {
     _sub: Subscription,
 }
 
+/// 代码块语言选择浮层：搜索框 + 过滤后的语言列表。
+pub struct LangSearch {
+    pub input: Entity<LineInput>,
+    _sub: Subscription,
+}
+
 /// 评论输入浮层。
 pub struct CommentInput {
     pub block: usize,
@@ -351,7 +359,14 @@ impl EventEmitter<EditorEvent> for Editor {}
 pub struct Popups {
     pub slash: Option<SlashMenu>,
     pub block_menu: Option<usize>,
+    /// 打开语言菜单的代码块
     pub lang_menu: Option<usize>,
+    /// 语言菜单的搜索输入（打开时创建，关掉即释放）
+    pub lang_search: Option<LangSearch>,
+    /// 语言菜单里高亮的下标（↑↓ 切换）
+    pub lang_sel: usize,
+    /// 语言菜单刚被「点击外部」关掉的时刻：同一次点击不要再把它点开
+    pub lang_closed_at: Option<Instant>,
     pub link_edit: Option<LinkEdit>,
     /// 浮动工具栏当前展开的下拉（文本类型 / 对齐 / 颜色）
     pub tb_menu: Option<TbMenu>,
@@ -403,6 +418,8 @@ pub struct RenderCaches {
     pub diagram_good: RefCell<HashMap<u64, Arc<crate::canvas::Scene>>>,
     /// 文本绘图源码区的滚动状态（按块 id）
     pub diagram_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
+    /// 代码块关闭自动换行后的横向滚动状态（按块 id）
+    pub code_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
     /// 不换行空格宽度 / 字号（每帧测量）
     pub nbsp_w: std::cell::Cell<f32>,
     pub nbsp_measured: bool,
@@ -414,6 +431,8 @@ pub struct RenderCaches {
 /// 当前文档的界面会话状态（浮层、预览、拖动、阅读模式…），指向块 id / 下标，切换文档时整体重置。
 #[derive(Default)]
 pub struct DocSession {
+    /// 当前鼠标所在的代码块 id（用于「同一时刻只有一个代码块显示边框」）
+    pub hover_code: Option<u64>,
     pub html_live: Option<u64>,
     pub video_full: Option<u64>,
     /// 「视频或文件」块的全屏预览（顶栏 退出 / 文件名 / 下载 + 下方内容）
@@ -603,6 +622,7 @@ impl Editor {
         self.pop.slash = None;
         self.pop.block_menu = None;
         self.pop.lang_menu = None;
+        self.pop.lang_search = None;
         self.pop.ordered_menu = None;
         self.pop.mention = None;
         self.pop.link_edit = None;
@@ -915,6 +935,7 @@ impl Editor {
         }
         self.pop.block_menu = None;
         self.pop.lang_menu = None;
+        self.pop.lang_search = None;
         self.pop.ordered_menu = None;
         self.pop.mention = None;
         self.reveal_head();

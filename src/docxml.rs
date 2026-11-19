@@ -168,7 +168,7 @@ fn block(n: Node, indent: u8, out: &mut Vec<Block>) {
             let code: String = n.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()).collect();
             let kind = match lang.as_str() {
                 "mermaid" => BlockKind::Diagram { view: 0, offsets: Default::default() },
-                _ => BlockKind::Code { lang },
+                _ => BlockKind::Code { lang, wrap: true },
             };
             push(out, kind, RichText::plain(code), indent, 0);
         }
@@ -543,7 +543,7 @@ fn emit(blocks: &[&Block], depth: usize, out: &mut String) {
                 paragraphs(&b.text, &format!("{pad}  "), out);
                 let _ = writeln!(out, "{pad}</callout>");
             }
-            BlockKind::Code { lang } => {
+            BlockKind::Code { lang, .. } => {
                 let lang = if lang.is_empty() { "plaintext" } else { lang };
                 let _ = writeln!(out, "{pad}<pre lang=\"{}\"><code>{}</code></pre>", esc(lang), esc(&b.text.text));
             }
@@ -707,7 +707,7 @@ mod tests {
         assert_eq!(find("引用一").kind, BlockKind::Quote);
         assert!(find("引用一").text.text.contains("引用二"));
         assert_eq!(find("提示").kind, BlockKind::Callout { emoji: "💡".into(), color: 2 });
-        assert_eq!(find("fn main").kind, BlockKind::Code { lang: "rust".into() });
+        assert_eq!(find("fn main").kind, BlockKind::Code { lang: "rust".into(), wrap: true });
         assert!(find("fn main").text.text.contains("<hi> & 'q'"));
         assert!(matches!(&find("七").kind, BlockKind::Heading { level: 6 }));
         assert_eq!(find("三级").align, 1);

@@ -22,6 +22,9 @@ fn icon_body(name: &str) -> Option<&'static str> {
         "chevron-up" => r##"<path d="m18 15-6-6-6 6"/>"##,
         "chevron-right" => r##"<path d="m9 18 6-6-6-6"/>"##,
         "copy" => r##"<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>"##,
+        "wrap" => {
+            r##"<line x1="3" x2="21" y1="6" y2="6"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><line x1="3" x2="10" y1="18" y2="18"/>"##
+        }
         "image" => r##"<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>"##,
         "arrow-up" => r##"<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>"##,
         "arrow-down" => r##"<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>"##,
@@ -508,6 +511,68 @@ pub fn scrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl In
                 }
                 let y = (s0 + (ev.position.y - y0) * per_px).clamp(px(0.), max);
                 h.set_offset(point(h.offset().x, -y));
+                cx.stop_propagation();
+                window.refresh();
+            });
+            let d = drag.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, _, window, cx| {
+                if d.take().is_some() {
+                    cx.stop_propagation();
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// 叠加在滚动容器底部的水平滚动条（代码块关闭自动换行时使用）；拖动拇指或点轨道滚动。
+pub fn hscrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let view = handle.bounds();
+            let max = handle.max_offset().width;
+            if max <= px(0.5) || view.size.width <= px(20.) {
+                return;
+            }
+            let inset = px(4.);
+            let track_w = view.size.width - inset * 2.;
+            let thumb_w = (track_w * (view.size.width / (view.size.width + max))).max(px(28.));
+            let scrolled = -handle.offset().x;
+            let thumb_left = view.left() + inset + (track_w - thumb_w) * (scrolled / max);
+            let track = Bounds::new(point(view.left(), view.bottom() - px(10.)), size(view.size.width, px(10.)));
+            let thumb = Bounds::new(point(thumb_left, view.bottom() - px(8.)), size(thumb_w, px(5.)));
+            let active = drag.get().is_some();
+            window.paint_quad(fill(thumb, color.opacity(if active { 0.75 } else { 0.5 })).corner_radii(px(2.5)));
+            let per_px = max / (track_w - thumb_w).max(px(1.));
+            let (d, h) = (drag.clone(), handle.clone());
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left || !track.contains(&ev.position) {
+                    return;
+                }
+                if !thumb.contains(&ev.position) {
+                    // 点在轨道上：让拇指中心跳到点击处
+                    let x = ((ev.position.x - track.left() - inset - thumb_w / 2.) * per_px).clamp(px(0.), max);
+                    h.set_offset(point(-x, h.offset().y));
+                }
+                d.set(Some((ev.position.x, -h.offset().x)));
+                cx.stop_propagation();
+                window.refresh();
+            });
+            let (d, h) = (drag.clone(), handle.clone());
+            window.on_mouse_event(move |ev: &MouseMoveEvent, _, window, cx| {
+                let Some((x0, s0)) = d.get() else { return };
+                if !ev.dragging() {
+                    d.set(None);
+                    window.refresh();
+                    return;
+                }
+                let x = (s0 + (ev.position.x - x0) * per_px).clamp(px(0.), max);
+                h.set_offset(point(-x, h.offset().y));
                 cx.stop_propagation();
                 window.refresh();
             });

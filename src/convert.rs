@@ -179,7 +179,7 @@ pub fn blocks_to_md(blocks: &[impl std::ops::Deref<Target = Block>]) -> String {
                     }
                 }
             }
-            BlockKind::Code { lang } => {
+            BlockKind::Code { lang, .. } => {
                 let l = if lang == "Plain Text" { "" } else { lang.as_str() };
                 out.push_str(&format!("```{}\n{}\n```\n", l.to_lowercase(), b.text.text));
             }
@@ -372,7 +372,7 @@ pub fn blocks_to_html(blocks: &[impl std::ops::Deref<Target = Block>]) -> String
             BlockKind::Callout { emoji, .. } => {
                 out.push_str(&format!("<blockquote style=\"background:#F0F4FF;border-left:4px solid #3B6CF6;padding:8px 12px\">{emoji} {t}</blockquote>"))
             }
-            BlockKind::Code { lang } => {
+            BlockKind::Code { lang, .. } => {
                 out.push_str(&format!("<pre><code class=\"language-{}\">{}</code></pre>", lang.to_lowercase(), html_escape(&b.text.text)))
             }
             BlockKind::Divider => out.push_str("<hr>"),
@@ -627,7 +627,7 @@ pub fn md_to_blocks(md: &str) -> Vec<Block> {
                         CodeBlockKind::Fenced(l) => normalize_lang(&l),
                         CodeBlockKind::Indented => "Plain Text".into(),
                     };
-                    b.open(BlockKind::Code { lang }, 0);
+                    b.open(BlockKind::Code { lang, wrap: true }, 0);
                     in_code = true;
                 }
                 Tag::List(start) => {
@@ -681,7 +681,7 @@ pub fn md_to_blocks(md: &str) -> Vec<Block> {
                     if let Some(cur) = &mut b.cur {
                         let t = cur.text.text.trim_end_matches('\n').to_string();
                         cur.text = RichText::plain(t);
-                        if matches!(&cur.kind, BlockKind::Code { lang } if lang.eq_ignore_ascii_case("mermaid")) {
+                        if matches!(&cur.kind, BlockKind::Code { lang, .. } if lang.eq_ignore_ascii_case("mermaid")) {
                             cur.kind = BlockKind::Diagram { view: 0, offsets: Default::default() };
                         }
                     }
@@ -1199,7 +1199,7 @@ impl<'a> HtmlWalker<'a> {
                     .map(|l| normalize_lang(&l))
                     .unwrap_or_else(|| "Plain Text".into());
                 let text: String = el.text().collect();
-                self.b.open(BlockKind::Code { lang }, 0);
+                self.b.open(BlockKind::Code { lang, wrap: true }, 0);
                 self.b.push_raw(text.trim_end_matches('\n'));
                 self.b.flush();
             }
@@ -1439,7 +1439,7 @@ mod tests {
         let p = &blocks[1].text;
         assert!(p.spans.iter().any(|s| s.marks.bold));
         assert!(p.spans.iter().any(|s| s.marks.color == 1));
-        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into() });
+        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into(), wrap: true });
     }
 
     #[test]
@@ -1538,7 +1538,7 @@ mod tests {
         assert_eq!(kinds[0], (BlockKind::Todo { checked: true }, "完成了".to_string()));
         assert_eq!(kinds[1], (BlockKind::Todo { checked: false }, "还没做".to_string()));
         assert_eq!(kinds[2], (BlockKind::Callout { emoji: "🌰".into(), color: 2 }, "第一行\n第二行".to_string()), "{kinds:#?}");
-        assert!(matches!(&kinds[3].0, BlockKind::Code { lang } if lang.eq_ignore_ascii_case("python")), "{kinds:#?}");
+        assert!(matches!(&kinds[3].0, BlockKind::Code { lang, .. } if lang.eq_ignore_ascii_case("python")), "{kinds:#?}");
         assert_eq!(bs.len(), 4, "{kinds:#?}");
         assert!(bs[2].text.runs().all(|(_, m)| m.bg == 0), "高亮块底色不应变成文字底色");
     }
