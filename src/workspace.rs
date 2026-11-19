@@ -17,6 +17,7 @@ mod graph;
 mod panels;
 mod present;
 mod shortcuts_panel;
+mod tree;
 
 actions!(
     stonebrook,
@@ -48,7 +49,8 @@ actions!(
         ShowShortcuts,
         ExportDocxXml,
         CheckUpdate,
-        InstallUpdate
+        InstallUpdate,
+        CancelConfirm
     ]
 );
 
@@ -57,6 +59,20 @@ struct Switcher {
     results: Vec<(String, String, String)>,
     selected: usize,
     _sub: Subscription,
+}
+
+/// 破坏性操作前的二次确认（目前用于回收站里的「永久删除」）。
+/// 移到回收站这类可撤销的操作不弹窗，只用 toast 告知，避免高频打扰。
+struct Confirm {
+    title: SharedString,
+    body: SharedString,
+    ok: SharedString,
+    action: ConfirmAction,
+}
+
+enum ConfirmAction {
+    /// 永久删除文档（连同其子文档与评论）
+    Purge(String),
 }
 
 pub struct Workspace {
@@ -101,6 +117,10 @@ pub struct Workspace {
     base_picker: Option<Vec<(String, String, usize)>>,
     template_list: Vec<(String, String, String)>,
     settings_open: bool,
+    /// 待确认的破坏性操作（永久删除）；Some 时显示确认弹窗并拦截点击
+    confirm: Option<Confirm>,
+    /// 确认弹窗的焦点（弹窗打开时聚焦它，Esc 才能关掉，而不是落到编辑器的 Esc 处理上）
+    confirm_focus: FocusHandle,
     /// 已经提示过「新版本已下载」的版本号
     update_notified: Option<String>,
     /// 右侧评论侧栏是否展开
@@ -614,6 +634,8 @@ impl Workspace {
             base_picker: None,
             template_list: vec![],
             settings_open: false,
+            confirm: None,
+            confirm_focus: cx.focus_handle(),
             update_notified: None,
             comments_open: false,
             author_input,
@@ -861,12 +883,64 @@ impl Workspace {
                 }
             }
         }
-        self.show_toast(format!("「{}」已移到回收站", if title.is_empty() { "未命名文档" } else { &title }), cx);
+        let name = if title.is_empty() { "未命名文档" } else { &title };
+        self.show_toast(format!("「{name}」已移到回收站，可在回收站恢复"), cx);
     }
 
     fn trash_doc(&mut self, _: &TrashDoc, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.current.clone();
         self.trash_doc_id(id, window, cx);
+    }
+
+    /// 永久删除前先确认：`purge` 会递归删掉所有子孙文档和评论，不可撤销。
+    fn ask_purge(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(meta) = self.docs.iter().find(|d| d.id == id) else { return };
+        let name = if meta.title.trim().is_empty() { "未命名文档".to_string() } else { meta.title.trim().to_string() };
+        let (kids, alive) = tree::subtree_stats(&self.docs, &id);
+        let english = crate::i18n::english();
+        let title: SharedString = if english { format!("Delete “{name}” permanently?") } else { format!("永久删除「{name}」？") }.into();
+        let body: SharedString = match (english, kids, alive) {
+            (false, 0, _) => "删除后无法恢复。".into(),
+            (false, n, 0) => format!("该文档下还有 {n} 篇子文档，会一起永久删除，删除后无法恢复。").into(),
+            (false, n, m) => format!("该文档下还有 {n} 篇子文档会一起永久删除，其中有 {m} 篇不在回收站；删除后无法恢复。").into(),
+            (true, 0, _) => "This can’t be undone.".into(),
+            (true, n, 0) => format!("Its {n} sub-document(s) will be deleted too. This can’t be undone.").into(),
+            (true, n, m) => format!("Its {n} sub-document(s) will be deleted too, including {m} not in the Trash. This can’t be undone.").into(),
+        };
+        self.confirm = Some(Confirm { title, body, ok: crate::i18n::tr("永久删除").into(), action: ConfirmAction::Purge(id) });
+        // 焦点移进弹窗：不然 Esc / 回车会落到编辑器上
+        window.focus(&self.confirm_focus);
+        cx.notify();
+    }
+
+    /// 取消并关掉弹窗，把焦点还给编辑器。
+    fn close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() {
+            window.focus(&self.editor.focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    /// 执行确认弹窗里的操作；当前文档被删掉时切到别的文档，避免停在已不存在的内容上。
+    fn confirm_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.confirm.take() else { return };
+        match c.action {
+            ConfirmAction::Purge(id) => {
+                self.store.purge(&id);
+                self.reload_docs();
+                if self.docs.iter().find(|d| d.id == self.current).is_none_or(|d| d.deleted) {
+                    match self.docs.iter().find(|d| !d.deleted).map(|d| d.id.clone()) {
+                        Some(next) => self.open_doc(&next, window, cx),
+                        None => {
+                            self.create_doc(None, DocContent::new_empty(""), window, cx);
+                        }
+                    }
+                }
+                self.show_toast("已永久删除".into(), cx);
+            }
+        }
+        window.focus(&self.editor.focus_handle(cx));
+        cx.notify();
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -1460,13 +1534,10 @@ impl Workspace {
                                         this.show_toast("已恢复".into(), cx);
                                     },
                                 )))
-                                .child(icon_button(SharedString::from(format!("pg-{}", d.id)), "x", "永久删除", cx).on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.store.purge(&b);
-                                        this.reload_docs();
-                                        this.show_toast("已永久删除".into(), cx);
-                                    },
-                                )))
+                                .child(
+                                    icon_button(SharedString::from(format!("pg-{}", d.id)), "x", "永久删除", cx)
+                                        .on_click(cx.listener(move |this, _, window, cx| this.ask_purge(b.clone(), window, cx))),
+                                )
                         })),
                 )
             })
@@ -2300,6 +2371,60 @@ impl Workspace {
             )
     }
 
+    /// 破坏性操作的确认弹窗：Esc、点弹窗外或「取消」都算放弃。
+    fn render_confirm(&self, t: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::base::widgets::{ghost_btn, primary_btn};
+        let c = self.confirm.as_ref()?;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(t.overlay)
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .key_context("Confirm")
+                .track_focus(&self.confirm_focus)
+                .on_action(cx.listener(|this, _: &CancelConfirm, window, cx| this.close_confirm(window, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_confirm(window, cx)))
+                .child(
+                    div()
+                        .id("confirm-dlg")
+                        .w(px(400.))
+                        .p(px(24.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded(px(14.))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.text).child(c.title.clone()))
+                        .child(div().text_size(px(13.)).line_height(px(20.)).text_color(t.text_secondary).child(c.body.clone()))
+                        .child(
+                            div()
+                                .mt(px(8.))
+                                .flex()
+                                .flex_row()
+                                .justify_end()
+                                .gap(px(8.))
+                                .child(
+                                    ghost_btn("confirm-cancel", crate::i18n::tr("取消"), t)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(window, cx))),
+                                )
+                                .child(
+                                    primary_btn("confirm-ok", c.ok.clone(), t)
+                                        .bg(t.fg_palette[1])
+                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_ok(window, cx))),
+                                ),
+                        ),
+                ),
+        )
+    }
+
     fn render_toast(&self, t: &Theme) -> Option<impl IntoElement> {
         let msg = self.toast.clone()?;
         Some(
@@ -2360,8 +2485,13 @@ impl Render for Workspace {
                 crate::updater::run(true, true);
             }))
             .on_action(cx.listener(|this, _: &InstallUpdate, _, cx| this.install_update(cx)))
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && (this.settings_open || this.template_picker.is_some() || this.base_picker.is_some()) {
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape"
+                    && (this.confirm.is_some() || this.settings_open || this.template_picker.is_some() || this.base_picker.is_some())
+                {
+                    if this.confirm.take().is_some() {
+                        window.focus(&this.editor.focus_handle(cx));
+                    }
                     this.settings_open = false;
                     this.template_picker = None;
                     this.base_picker = None;
@@ -2407,6 +2537,7 @@ impl Render for Workspace {
             .when(self.settings_open, |d| d.child(self.render_settings(&t, cx)))
             .children(self.render_palette(&t, cx))
             .children(self.render_shortcuts_panel(&t, cx))
+            .children(self.render_confirm(&t, cx))
             .children(self.render_present(window, cx))
             .children(self.render_graph(window, cx))
             .when_some(self.embed.as_ref().map(|e| e.0.clone()), |d, v| d.child(div().absolute().inset_0().occlude().child(v)))

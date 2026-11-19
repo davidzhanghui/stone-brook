@@ -728,7 +728,12 @@ impl Editor {
 
     pub fn block_mut(&mut self, i: usize) -> &mut Block {
         self.caches.fold_cache.get_mut().take();
+        // `splice(i..i+1, 1)` 只用来让列表重新测量这一块的高度，但 gpui 会把它当成「替换了锚点所在的项」，
+        // 把 offset_in_item 清零 —— 在代码块这类比视口还高的块里编辑时，整个块会跳回第一屏。
+        // 这里先记下滚动锚点，测量无效化之后原样恢复。
+        let anchor = self.list.logical_scroll_top();
         self.list.splice(i..i + 1, 1);
+        self.list.scroll_to(anchor);
         Arc::make_mut(&mut self.content.blocks[i])
     }
 

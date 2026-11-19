@@ -131,6 +131,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-t", InsertTimestamp, e),
         KeyBinding::new("cmd-.", ToggleFold, e),
         KeyBinding::new("cmd-alt-.", FocusBlock, e),
+        // 确认弹窗（永久删除）：Esc 取消
+        KeyBinding::new("escape", CancelConfirm, Some("Confirm")),
         // 全局
         KeyBinding::new("cmd-n", NewDoc, None),
         KeyBinding::new("cmd-shift-n", NewSubDoc, None),

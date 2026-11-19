@@ -26,7 +26,11 @@ actions!(
         ICancel,
         IUp,
         IDown,
-        IWordBack
+        IWordBack,
+        ISelectWordLeft,
+        ISelectWordRight,
+        ISelectHome,
+        ISelectEnd
     ]
 );
 
@@ -146,6 +150,18 @@ impl LineInput {
     }
     fn select_right(&mut self, _: &ISelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor()), cx)
+    }
+    fn select_word_left(&mut self, _: &ISelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(prev_word_start(&self.content, self.cursor()), cx)
+    }
+    fn select_word_right(&mut self, _: &ISelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word_end(&self.content, self.cursor()), cx)
+    }
+    fn select_home(&mut self, _: &ISelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx)
+    }
+    fn select_end(&mut self, _: &ISelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx)
     }
     fn select_all(&mut self, _: &ISelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selected = 0..self.content.len();
@@ -267,6 +283,91 @@ pub(crate) fn clamp_str_range(s: &str, r: Range<usize>) -> Range<usize> {
         b += 1;
     }
     a..b
+}
+
+/// 词的边界：字母 / 数字 / 下划线连成一个词。汉字连续段也算一个词
+/// （UAX#29 把汉字拆成单字，双击只选中一个字，不符合直觉）。
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// 双击选中的区间：点中的词；点在空白 / 标点上时选相邻的词（优先左边）。
+pub(crate) fn word_range_at(text: &str, o: usize) -> Range<usize> {
+    let mut o = o.min(text.len());
+    while o < text.len() && !text.is_char_boundary(o) {
+        o += 1;
+    }
+    let at = text[o..].chars().next();
+    let prev = text[..o].char_indices().next_back();
+    let word = at.is_some_and(is_word_char) || prev.is_some_and(|(_, c)| is_word_char(c));
+    let same = |c: char| is_word_char(c) == word;
+    let (mut start, mut end) = (o, o);
+    if let Some(c) = at {
+        if same(c) {
+            end = o + c.len_utf8();
+        }
+    }
+    if let Some((i, c)) = prev {
+        if same(c) {
+            start = i;
+        }
+    }
+    while let Some((i, c)) = text[..start].char_indices().next_back() {
+        if same(c) {
+            start = i;
+        } else {
+            break;
+        }
+    }
+    while end < text.len() {
+        let c = text[end..].chars().next().unwrap();
+        if same(c) {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    start..end
+}
+
+/// 光标左边那个词的起点（alt+shift+← 用）。
+fn prev_word_start(text: &str, o: usize) -> usize {
+    let mut i = o.min(text.len());
+    while let Some((j, c)) = text[..i].char_indices().next_back() {
+        if is_word_char(c) {
+            break;
+        }
+        i = j;
+    }
+    while let Some((j, c)) = text[..i].char_indices().next_back() {
+        if is_word_char(c) {
+            i = j;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// 光标右边那个词的终点（alt+shift+→ 用）。
+fn next_word_end(text: &str, o: usize) -> usize {
+    let mut i = o.min(text.len());
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        if is_word_char(c) {
+            break;
+        }
+        i += c.len_utf8();
+    }
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        if is_word_char(c) {
+            i += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    i
 }
 
 impl EntityInputHandler for LineInput {
@@ -481,6 +582,10 @@ impl Render for LineInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -495,13 +600,30 @@ impl Render for LineInput {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, w, cx| {
-                    this.selecting = true;
                     w.focus(&this.focus);
                     let ix = this.index_for_mouse(e.position);
-                    if e.modifiers.shift {
-                        this.select_to(ix, cx)
-                    } else {
-                        this.move_to(ix, cx)
+                    match e.click_count {
+                        // 双击选词、三击全选（和系统文本框一致）
+                        2 => {
+                            this.selected = word_range_at(&this.content, ix);
+                            this.reversed = false;
+                            this.selecting = false;
+                            cx.notify();
+                        }
+                        n if n >= 3 => {
+                            this.selected = 0..this.content.len();
+                            this.reversed = false;
+                            this.selecting = false;
+                            cx.notify();
+                        }
+                        _ => {
+                            this.selecting = true;
+                            if e.modifiers.shift {
+                                this.select_to(ix, cx)
+                            } else {
+                                this.move_to(ix, cx)
+                            }
+                        }
                     }
                 }),
             )
@@ -532,6 +654,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", IRight, c),
         KeyBinding::new("shift-left", ISelectLeft, c),
         KeyBinding::new("shift-right", ISelectRight, c),
+        KeyBinding::new("alt-shift-left", ISelectWordLeft, c),
+        KeyBinding::new("alt-shift-right", ISelectWordRight, c),
+        KeyBinding::new("shift-home", ISelectHome, c),
+        KeyBinding::new("shift-end", ISelectEnd, c),
+        KeyBinding::new("cmd-shift-left", ISelectHome, c),
+        KeyBinding::new("cmd-shift-right", ISelectEnd, c),
         KeyBinding::new("cmd-a", ISelectAll, c),
         KeyBinding::new("cmd-v", IPaste, c),
         KeyBinding::new("cmd-c", ICopy, c),
@@ -575,5 +703,34 @@ mod tests {
     fn clamp_range_handles_empty_content() {
         assert_eq!(clamp_str_range("", 0..0), 0..0);
         assert_eq!(clamp_str_range("", 3..7), 0..0);
+    }
+
+    use super::{next_word_end, prev_word_start, word_range_at};
+
+    /// 双击选词：英文按单词，汉字按连续段（不是单字）。
+    #[test]
+    fn double_click_selects_word() {
+        let s = "hello world 你好世界";
+        assert_eq!(word_range_at(s, 1), 0..5);
+        assert_eq!(word_range_at(s, 8), 6..11);
+        // 点在词尾的空白上：选左边那个词
+        assert_eq!(word_range_at(s, 11), 6..11);
+        assert_eq!(word_range_at(s, 13), 12..24);
+        assert_eq!(word_range_at(s, s.len()), 12..24);
+        assert_eq!(word_range_at("", 0), 0..0);
+        // 下划线和数字都是词的一部分
+        assert_eq!(word_range_at("my_var2 = 1", 2), 0..7);
+    }
+
+    /// alt+shift+← / → 的词边界。
+    #[test]
+    fn keyboard_word_selection_bounds() {
+        let s = "hello world";
+        assert_eq!(prev_word_start(s, 11), 6);
+        assert_eq!(prev_word_start(s, 6), 0);
+        assert_eq!(prev_word_start(s, 0), 0);
+        assert_eq!(next_word_end(s, 0), 5);
+        assert_eq!(next_word_end(s, 5), 11);
+        assert_eq!(next_word_end(s, 11), 11);
     }
 }
