@@ -148,7 +148,7 @@ pub fn stress(target_chars: usize) -> DocContent {
         } else if i.is_multiple_of(29) {
             let code = "fn render(frame: &mut Frame) -> Result<()> {\n    for block in frame.visible_blocks() {\n        block.paint()?; // 只绘制可见块\n    }\n    Ok(())\n}";
             total += code.chars().count();
-            blocks.push(Block::new(BlockKind::Code { lang: "Rust".into(), wrap: true }, RichText::plain(code)));
+            blocks.push(Block::new(BlockKind::Code { lang: "Rust".into(), wrap: true, height: None }, RichText::plain(code)));
         } else if i.is_multiple_of(37) {
             let mut t = Block::table(3, 3);
             if let BlockKind::Table { cells, .. } = &mut t.kind {

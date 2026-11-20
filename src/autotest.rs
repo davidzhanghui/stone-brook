@@ -10,10 +10,13 @@
 //!   commit 你好           输入法上屏
 //!   click X Y [N] [shift] 窗口坐标点击（N 为连击次数）
 //!   rclick X Y [N] / rmove X Y  投递真实 NSEvent 鼠标点击 / 移动
-//!   drag X1 Y1 X2 Y2     拖拽
+//!   drag X1 Y1 X2 Y2     拖拽（文本选择）
+//!   rdrag X1 Y1 X2 Y2    真实鼠标拖拽（按下→拖动→抬起，用于手柄类交互）
 //!   scroll DY            滚动
 //!   html 文件路径          把 HTML 文件放进剪贴板（模拟从网页复制）
 //!   htmlfile 文件路径      把 HTML 文件设为光标所在 HTML 块的内容（模拟上传）
+//!   codelang JavaScript  设置代码块语言 / foldline N 折叠第 N 行（0 起）
+//!   codegoto B / codebox  光标移到第 B 块 / 打印每个代码块的高度与布局
 //!   attach 路径… / fileview 块 视图 / filefull 块 / drawio 路径
 //!   wait MS / shot NAME / dump / quit
 //!
@@ -131,6 +134,16 @@ pub fn run(script: String, handle: WindowHandle<Workspace>, cx: &mut App) {
 /// 在窗口坐标 (x, y) 投递一次鼠标按下 + 抬起（click_count = n）。
 fn post_ns_mouse(window: &Window, x: f32, y: f32, n: isize, right: bool) {
     post_ns_mouse_events(window, x, y, n, if right { &[MouseKind::RightDown, MouseKind::RightUp] } else { &[MouseKind::LeftDown, MouseKind::LeftUp] });
+}
+
+/// 真实鼠标拖拽：按下 → 若干拖动 → 抬起（用于缩放手柄这类非文本交互的端到端测试）。
+fn post_ns_drag(window: &Window, from: (f32, f32), to: (f32, f32), steps: usize) {
+    post_ns_mouse_events(window, from.0, from.1, 1, &[MouseKind::LeftDown]);
+    for i in 1..=steps {
+        let t = i as f32 / steps.max(1) as f32;
+        post_ns_mouse_events(window, from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, 1, &[MouseKind::LeftDragged]);
+    }
+    post_ns_mouse_events(window, to.0, to.1, 1, &[MouseKind::LeftUp]);
 }
 
 #[derive(Clone, Copy)]
@@ -348,6 +361,11 @@ static COMMANDS: &[(&[&str], Cmd)] = &[
         // 打印窗口在屏幕上的位置，供外部真实鼠标注入换算坐标
         let b = window.bounds();
         println!("WIN x={} y={} w={} h={}", f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+    }),
+    (&["rdrag"], |cmd, arg, nums, ws, window, cx| {
+        if nums.len() >= 4 {
+            post_ns_drag(window, (nums[0], nums[1]), (nums[2], nums[3]), 8);
+        }
     }),
     (&["drag"], |cmd, arg, nums, ws, window, cx| {
         let (a, b) = (point(px(nums[0]), px(nums[1])), point(px(nums[2]), px(nums[3])));
@@ -914,6 +932,38 @@ static COMMANDS: &[(&[&str], Cmd)] = &[
         editor.update(cx, |e, cx| e.toggle_comment_open(ix, cx));
     }),
     (&["text"], |cmd, arg, nums, ws, window, cx| crate::clipboard::write(&arg.replace("\\n", "\n"), None, None)),
+    (&["foldline"], |cmd, arg, nums, ws, window, cx| {
+        let editor = ws.read(cx).editor().clone();
+        editor.update(cx, |e, cx| {
+            let b = e.core.head.block;
+            let line = nums.first().copied().unwrap_or(0.) as usize;
+            e.toggle_code_fold(b, line, cx);
+        });
+    }),
+    (&["codelang"], |cmd, arg, nums, ws, window, cx| {
+        let editor = ws.read(cx).editor().clone();
+        editor.update(cx, |e, cx| {
+            let b = e.core.head.block;
+            e.set_code_lang(b, arg.trim(), cx);
+        });
+    }),
+    (&["codegoto"], |_, arg, _, ws, _, cx| {
+        // codegoto B：把光标移到第 B 块并滚动到可见（之后 wait 一下再看 codebox）
+        let b = arg.trim().parse::<usize>().unwrap_or(0);
+        let editor = ws.read(cx).editor().clone();
+        editor.update(cx, |e, cx| e.set_cursor(crate::editor::Pos::new(b, 0, 0), false, cx));
+    }),
+    (&["codebox"], |_, _, _, ws, _, cx| {
+        // codebox：打印每个代码块的文本布局区域、记录的内容高度、块上存的固定高度
+        let e = ws.read(cx).editor().read(cx);
+        let f = e.frame.borrow();
+        for (i, b) in e.content.blocks.iter().enumerate() {
+            if let crate::model::BlockKind::Code { lang, wrap, height } = &b.kind {
+                let lb = f.layouts.get(&(i, 0)).map(|l| l.bounds());
+                println!("CODEBOX b={i} lang={lang} wrap={wrap} height={height:?} layout={:?} content_h={:?}", lb, e.caches.code_body_h.borrow().get(&b.id));
+            }
+        }
+    }),
     (&["dump"], |cmd, arg, nums, ws, window, cx| {
         let e = ws.read(cx).editor().read(cx);
         println!("===DUMP {} blocks / head {:?} anchor {:?}===", e.content.blocks.len(), e.core.head, e.core.anchor);

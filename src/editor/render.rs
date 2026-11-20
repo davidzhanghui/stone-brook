@@ -9,6 +9,10 @@ use crate::theme::{theme, Theme};
 use crate::ui::{icon, Tooltip};
 use std::path::PathBuf;
 
+/// 代码块可拖动高度的上下限（正文区，不含工具栏）
+pub(crate) const CODE_MIN_H: f32 = 84.;
+pub(crate) const CODE_MAX_H: f32 = 2000.;
+
 pub fn content_w() -> f32 {
     if crate::settings::wide() {
         960.
@@ -50,6 +54,8 @@ pub struct SlotSpec {
     pub nowrap: bool,
     /// 关闭换行时的横向滚动句柄：光标移出可视区时自动跟过去
     pub hscroll: Option<ScrollHandle>,
+    /// 代码块折叠：要隐藏的模型字节区间（已排序、互不重叠）
+    pub folds: Option<Rc<Vec<(usize, usize)>>>,
 }
 
 impl SlotSpec {
@@ -65,6 +71,7 @@ impl SlotSpec {
             lang: None,
             nowrap: false,
             hscroll: None,
+            folds: None,
         }
     }
 }
@@ -280,41 +287,56 @@ fn build_runs(
 /// 模型偏移 ⇄ 显示偏移。每个公式在模型里占 3 字节，显示时占 d_len 字节。
 #[derive(Debug, Default)]
 pub struct DisplayMap {
-    /// (模型起点, 显示起点, 显示长度)
-    pub formulas: Vec<(usize, usize, usize)>,
+    /// 被替换掉的片段：模型区间 [m, m+mlen) 在显示上占 [d, d+dlen) 个字节
+    pub segs: Vec<Seg>,
+}
+
+/// 一段「模型区间 → 显示区间」的替换（行内公式占位 / 折叠占位）。
+#[derive(Debug)]
+pub struct Seg {
+    pub m: usize,
+    pub mlen: usize,
+    pub d: usize,
+    pub dlen: usize,
+    /// 是否行内公式（点击时打开公式编辑；否则是折叠占位，点击展开）
+    pub math: bool,
 }
 
 impl DisplayMap {
     pub fn m2d(&self, o: usize) -> usize {
         let mut delta: isize = 0;
-        for &(m, d, len) in &self.formulas {
-            if o <= m {
+        for s in &self.segs {
+            if o <= s.m {
                 break;
             }
-            if o < m + 3 {
-                return d;
+            if o < s.m + s.mlen {
+                return s.d;
             }
-            delta += len as isize - 3;
+            delta += s.dlen as isize - s.mlen as isize;
         }
-        (o as isize + delta) as usize
+        (o as isize + delta).max(0) as usize
     }
-    /// 显示偏移 → 模型偏移；落在公式内部时吸附到公式两端。
+    /// 显示偏移 → 模型偏移；落在占位符内部时吸附到两端。
     pub fn d2m(&self, d: usize) -> usize {
         let mut delta: isize = 0;
-        for &(m, ds, len) in &self.formulas {
-            if d < ds {
+        for s in &self.segs {
+            if d < s.d {
                 break;
             }
-            if d < ds + len {
-                return if d - ds > len / 2 { m + 3 } else { m };
+            if d < s.d + s.dlen {
+                return if d - s.d > s.dlen / 2 { s.m + s.mlen } else { s.m };
             }
-            delta += len as isize - 3;
+            delta += s.dlen as isize - s.mlen as isize;
         }
         (d as isize - delta).max(0) as usize
     }
-    /// 显示偏移是否落在某个公式上，返回公式的模型起点。
+    /// 显示偏移落在行内公式上时，返回公式的模型起点。
     pub fn formula_at(&self, d: usize) -> Option<usize> {
-        self.formulas.iter().find(|&&(_, ds, len)| d >= ds && d < ds + len).map(|f| f.0)
+        self.segs.iter().find(|s| s.math && d >= s.d && d < s.d + s.dlen).map(|s| s.m)
+    }
+    /// 显示偏移落在折叠占位上时，返回折叠区间的模型起点。
+    pub fn fold_at(&self, d: usize) -> Option<usize> {
+        self.segs.iter().find(|s| !s.math && d >= s.d && d < s.d + s.dlen).map(|s| s.m)
     }
 }
 
@@ -356,7 +378,7 @@ fn build_display(
                 out.insert(out.len(), &format!("${tex}$"), marks);
             }
         }
-        map.formulas.push((*start, d_start, out.len() - d_start));
+        map.segs.push(Seg { m: *start, mlen: 3, d: d_start, dlen: out.len() - d_start, math: true });
         pos = start + 3;
     }
     if pos < rt.len() {
@@ -364,6 +386,31 @@ fn build_display(
         out.insert_rich(out.len(), &seg);
     }
     (out, map, images)
+}
+
+/// 折叠显示：被收起的行区间替换成「⋯」，建立模型 ⇄ 显示的映射。
+fn build_folded(rt: &RichText, hides: &[(usize, usize)]) -> (RichText, DisplayMap) {
+    let mut out = RichText::default();
+    let mut map = DisplayMap { segs: vec![] };
+    let mut pos = 0usize;
+    for &(m, e) in hides {
+        let m = m.min(rt.len());
+        let e = e.min(rt.len()).max(m);
+        if m > pos {
+            let seg = rt.slice(pos..m);
+            out.insert_rich(out.len(), &seg);
+        }
+        let d = out.len();
+        const ELLIPSIS: &str = "⋯";
+        out.insert(out.len(), ELLIPSIS, Marks { code: true, color: 7, ..Default::default() });
+        map.segs.push(Seg { m, mlen: e.saturating_sub(m), d, dlen: ELLIPSIS.len(), math: false });
+        pos = pos.max(e);
+    }
+    if pos < rt.len() {
+        let seg = rt.slice(pos..rt.len());
+        out.insert_rich(out.len(), &seg);
+    }
+    (out, map)
 }
 
 impl Editor {
@@ -380,7 +427,10 @@ impl Editor {
         let slot = (b, c);
         // 行内公式：把占位字符替换成撑宽的空格（或源码），建立 模型偏移 ⇄ 显示偏移 的映射
         let maths = rt.math_spans();
-        let (disp, map, images) = if maths.is_empty() {
+        let (disp, map, images) = if let Some(hides) = spec.folds.as_ref().filter(|h| !h.is_empty()) {
+            let (d, m) = build_folded(rt, hides);
+            (Some(d), Some(Rc::new(m)), vec![])
+        } else if maths.is_empty() {
             (None, None, vec![])
         } else {
             let (d, m, im) = build_display(rt, &maths, &spec, self.caches.nbsp_w.get() * spec.size, t.dark);
@@ -599,7 +649,7 @@ impl Editor {
             }
             BlockKind::Notes => self.render_block_notes(ix, cx, &blk, focused, &t),
             BlockKind::Callout { emoji, color } => self.render_block_callout(ix, cx, &blk, color, emoji, focused, &t),
-            BlockKind::Code { lang, wrap } => self.render_code(ix, &blk, lang, *wrap, focused, &t, cx),
+            BlockKind::Code { lang, wrap, height } => self.render_code(ix, &blk, lang, *wrap, *height, focused, &t, cx),
             BlockKind::Divider => {
                 let selected = self.block_selected(ix) && focused;
                 div()
@@ -689,7 +739,19 @@ impl Editor {
                     .child({
                         let col: gpui::Hsla = gpui::rgb(kind_icon_color(&blk.kind)).into();
                         let col = if t.dark { col.blend(gpui::hsla(0., 0., 1., 0.25)) } else { col };
-                        icon(kind_icon_name(&blk.kind), 14., col)
+                        // 文字类块用字母标签（飞书同款）：正文 T、标题 H1…H6，其余用图标
+                        match &blk.kind {
+                            BlockKind::Heading { level } => div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(col)
+                                .child(format!("H{}", level.min(&6)))
+                                .into_any_element(),
+                            BlockKind::Text | BlockKind::Title => {
+                                div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(col).child("T").into_any_element()
+                            }
+                            k => icon(kind_icon_name(k), 14., col).into_any_element(),
+                        }
                     })
                     // 阅读模式：不能打开块菜单
                     .when(!self.sess.read_only, |d| {
@@ -1040,11 +1102,21 @@ impl Editor {
             .into_any_element()
     }
 
-    fn render_code(&self, ix: usize, blk: &crate::model::Block, lang: &str, wrap: bool, focused: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_code(
+        &self,
+        ix: usize,
+        blk: &crate::model::Block,
+        lang: &str,
+        wrap: bool,
+        height: Option<f32>,
+        focused: bool,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // 关闭换行时的横向滚动句柄（按块保存）
         let scroll = (!wrap)
             .then(|| self.caches.code_scroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone());
-        let spec = SlotSpec {
+        let mut spec = SlotSpec {
             size: 13.5,
             line_h: 22.,
             mono: true,
@@ -1054,6 +1126,25 @@ impl Editor {
             ..SlotSpec::body(t)
         };
         let code = blk.text.text.clone();
+        // 折叠：按语言算区间，再取用户收起的那几条，合并成要隐藏的模型字节区间
+        let fold_spans = self.code_fold_spans(blk.id, lang, &blk.text.text);
+        let folded: std::collections::HashSet<usize> = self.sess.code_folds.get(&blk.id).cloned().unwrap_or_default();
+        if !fold_spans.is_empty() {
+            let starts = crate::editor::codefold::line_starts(&blk.text.text);
+            let eol = |k: usize| if k + 1 < starts.len() { starts[k + 1] - 1 } else { blk.text.text.len() };
+            let mut hides: Vec<(usize, usize)> =
+                fold_spans.iter().filter(|f| folded.contains(&f.start)).map(|f| (eol(f.start), eol(f.end))).filter(|(a, b)| b > a).collect();
+            hides.sort_by_key(|r| r.0);
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (a, b) in hides {
+                if let Some(last) = merged.last_mut().filter(|l| a <= l.1) {
+                    last.1 = last.1.max(b);
+                } else {
+                    merged.push((a, b));
+                }
+            }
+            spec.folds = (!merged.is_empty()).then(|| Rc::new(merged));
+        }
         let lang_open = self.pop.lang_menu == Some(ix);
         let lang_label = lang.to_string();
         // 飞书同款：默认无边框；鼠标所在块、或正在编辑的块（且此时鼠标不在别的代码块上）显示强调色边框。
@@ -1217,44 +1308,235 @@ impl Editor {
                                     .child(crate::i18n::tr("复制"))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                        cx.emit(EditorEvent::Toast("代码已复制".into()));
+                                        cx.emit(EditorEvent::ToastSuccess("复制成功".into()));
                                     })),
                             ),
                     ),
             )
-            .child(if wrap {
-                div()
-                    .px(px(16.))
-                    .pt(px(4.))
-                    .pb(px(12.))
-                    .child(self.render_slot(ix, 0, &blk.text, spec, focused, t))
-                    .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx))
-                    .into_any_element()
-            } else {
-                // 关闭换行：按内容固有宽度排版，放进横向滚动容器（尾部一行自定义滚动条）
-                let (handle, drag) = scroll.clone().unwrap();
+            .child({
+                // 高度：拖过下边缘就固定（存在块里、随文档保存），否则自适应；固定后正文区纵向滚动。
+                // 内容变短（改动文字、窗口变宽导致换行减少）后固定高度比内容还高时按内容自适应。
+                let content_h = self.caches.code_body_h.borrow().get(&blk.id).copied();
+                let wanted = self.sess.code_height_drag.as_ref().filter(|d| d.block == ix).map(|d| d.height).or(height);
+                let body_h = wanted.and_then(|h| match content_h {
+                    Some(c) if c > 1. && h >= c - 0.5 => None,
+                    _ => Some(h.clamp(CODE_MIN_H, CODE_MAX_H)),
+                });
+                let (vh, vd) =
+                    self.caches.code_vscroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone();
+                let recorder = self.caches.code_body_h.clone();
+                let body_id = blk.id;
+                let row = div()
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    // 记下正文的「内容高度」（不受固定高度影响），拖动时作为上限
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                recorder.borrow_mut().insert(body_id, f32::from(bounds.size.height));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    // 行号栏：数字不参与选中，也不随横向滚动移动
+                    .child(self.code_gutter(ix, &blk.text.text, spec.size, spec.line_h, &fold_spans, &folded, t, cx))
+                    .child(if wrap {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .pl(px(8.))
+                            .pr(px(16.))
+                            .pt(px(4.))
+                            .pb(px(12.))
+                            .child(self.render_slot(ix, 0, &blk.text, spec, focused, t))
+                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx))
+                            .into_any_element()
+                    } else {
+                        // 关闭换行：按内容固有宽度排版，放进横向滚动容器（尾部一行自定义滚动条）
+                        let (handle, drag) = scroll.clone().unwrap();
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .id(("code-scroll", blk.id as usize))
+                                    .flex()
+                                    .flex_row()
+                                    .overflow_x_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .track_scroll(&handle)
+                                    .pl(px(8.))
+                                    .pr(px(16.))
+                                    .pt(px(4.))
+                                    .pb(px(12.))
+                                    .child(
+                                        self.render_slot(ix, 0, &blk.text, spec, focused, t)
+                                            .flex_none()
+                                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
+                                    ),
+                            )
+                            .child(crate::ui::hscrollbar(handle, drag, t.text_muted))
+                            .into_any_element()
+                    });
                 div()
                     .relative()
                     .w_full()
                     .child(
+                        div().id(("code-body", blk.id as usize)).w_full().when_some(body_h, |d, h| d.h(px(h)).overflow_y_scroll().track_scroll(&vh)).child(row),
+                    )
+                    .when_some(body_h, |d, _| d.child(crate::ui::scrollbar(vh.clone(), vd.clone(), t.text_muted)))
+                    .child(
                         div()
-                            .id(("code-scroll", blk.id as usize))
+                            .id(("code-resize", blk.id as usize))
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(8.))
                             .flex()
-                            .flex_row()
-                            .overflow_x_scroll()
-                            .restrict_scroll_to_axis()
-                            .track_scroll(&handle)
-                            .px(px(16.))
-                            .pt(px(4.))
-                            .pb(px(12.))
+                            .items_center()
+                            .justify_center()
+                            .cursor(CursorStyle::ResizeUpDown)
+                            // 手柄常驻（只占下边缘 8px，可拖动），拖动条本身悬停才显形
                             .child(
-                                self.render_slot(ix, 0, &blk.text, spec, focused, t).flex_none().on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
+                                div()
+                                    .w(px(32.))
+                                    .h(px(3.))
+                                    .rounded(px(2.))
+                                    .bg(gpui::transparent_black())
+                                    .group_hover("code", |s| s.bg(t.text_muted.opacity(0.4))),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let start = body_h.or_else(|| this.caches.code_body_h.borrow().get(&body_id).copied()).unwrap_or(120.);
+                                    let max_h = this
+                                        .caches
+                                        .code_body_h
+                                        .borrow()
+                                        .get(&body_id)
+                                        .copied()
+                                        .unwrap_or(super::render::CODE_MAX_H)
+                                        .max(super::render::CODE_MIN_H);
+                                    this.sess.code_height_drag =
+                                        Some(super::CodeHeightDrag { block: ix, start_h: start, start_y: ev.position.y, height: start, max_h });
+                                    cx.notify();
+                                }),
                             ),
                     )
-                    .child(crate::ui::hscrollbar(handle, drag, t.text_muted))
-                    .into_any_element()
             })
             .into_any_element()
+    }
+
+    /// 代码块可折叠区间（按 (块 id, 文本哈希, 语言) 缓存）。
+    fn code_fold_spans(&self, id: u64, lang: &str, text: &str) -> Rc<Vec<crate::editor::codefold::FoldSpan>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        lang.hash(&mut h);
+        let key = h.finish();
+        if let Some((hash, l, spans)) = self.caches.fold_spans.borrow().get(&id) {
+            if *hash == key && l == lang {
+                return spans.clone();
+            }
+        }
+        let spans = Rc::new(crate::editor::codefold::spans(lang, text));
+        self.caches.fold_spans.borrow_mut().insert(id, (key, lang.to_string(), spans.clone()));
+        spans
+    }
+
+    /// 代码块行号栏（飞书样式）：位置取自文本布局，自动换行时也对准每个逻辑行的首行。
+    /// 可折叠的行在行号左侧画三角，点击收起 / 展开。
+    #[allow(clippy::too_many_arguments)]
+    fn code_gutter(
+        &self,
+        ix: usize,
+        code: &str,
+        size: f32,
+        line_h: f32,
+        folds: &[crate::editor::codefold::FoldSpan],
+        folded: &std::collections::HashSet<usize>,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let line_count = code.split('\n').count().max(1);
+        let digits = line_count.to_string().len();
+        let fold_col = if folds.is_empty() { 0. } else { 13. };
+        // Menlo 的等宽字宽约为 0.6023 em
+        let width = size * 0.6023 * digits as f32 + 18. + fold_col;
+        let code = code.to_string();
+        let frame = self.frame.clone();
+        let color = t.text_muted.opacity(0.85);
+        let chevron_color = t.text_muted.opacity(0.9);
+        let view = cx.entity().downgrade();
+        // 被收起的行：折叠起始行之后到结束行（含）
+        let mut hidden = vec![false; line_count];
+        for f in folds {
+            if folded.contains(&f.start) {
+                for k in (f.start + 1)..=f.end.min(line_count.saturating_sub(1)) {
+                    hidden[k] = true;
+                }
+            }
+        }
+        let folds = folds.to_vec();
+        let folded = folded.clone();
+        canvas(
+            move |_, _, _| {},
+            move |bounds, _, window, cx| {
+                let f = frame.borrow();
+                let layout = f.layouts.get(&(ix, 0)).cloned();
+                let map = f.maps.get(&(ix, 0)).cloned();
+                drop(f);
+                let Some(layout) = layout else { return };
+                let text_len = layout.len();
+                let m2d = |o: usize| map.as_ref().map_or(o, |m| m.m2d(o));
+                let mut off = 0usize;
+                let mut toggles: Vec<(usize, Bounds<Pixels>)> = Vec::new();
+                for k in 0..line_count {
+                    let start_off = off;
+                    off += code_line_len(&code, start_off) + 1;
+                    if hidden.get(k).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let Some(y) = layout.position_for_index(m2d(start_off).min(text_len)).map(|p| p.y) else { continue };
+                    let s = (k + 1).to_string();
+                    let run = TextRun { len: s.len(), font: font(MONO), color, background_color: None, underline: None, strikethrough: None };
+                    let line = window.text_system().shape_line(s.into(), px(size - 1.), &[run], None);
+                    line.paint(point(bounds.right() - px(10.) - line.width, y), px(line_h), window, cx).ok();
+                    if folds.iter().any(|f| f.start == k) {
+                        let open = !folded.contains(&k);
+                        let g = if open { "▾" } else { "▸" };
+                        let run =
+                            TextRun { len: g.len(), font: font(MONO), color: chevron_color, background_color: None, underline: None, strikethrough: None };
+                        let gl = window.text_system().shape_line(g.into(), px(size - 3.5), &[run], None);
+                        gl.paint(point(bounds.left() + px(2.), y), px(line_h), window, cx).ok();
+                        toggles.push((k, Bounds::new(point(bounds.left(), y), gpui::size(px(13.), px(line_h)))));
+                    }
+                }
+                let view = view.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
+                        return;
+                    }
+                    if let Some((line, _)) = toggles.iter().find(|(_, r)| r.contains(&ev.position)) {
+                        cx.stop_propagation();
+                        view.update(cx, |this, cx| this.toggle_code_fold(ix, *line, cx)).ok();
+                        window.refresh();
+                    }
+                });
+            },
+        )
+        .w(px(width))
+        .flex_none()
+        .into_any_element()
     }
 
     /// 图片块：选中后四角出现缩放手柄、上方浮出工具栏；双击查看大图；
@@ -1819,6 +2101,12 @@ impl Editor {
             .with_priority(4),
         )
     }
+}
+
+/// 从 `off` 开始的一行在字节上的长度（不含换行符）。
+fn code_line_len(code: &str, off: usize) -> usize {
+    let rest = &code[off.min(code.len())..];
+    rest.find('\n').unwrap_or(rest.len())
 }
 
 pub fn fmt_num(n: usize) -> String {

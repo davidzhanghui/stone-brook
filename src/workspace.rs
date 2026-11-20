@@ -95,6 +95,13 @@ enum ConfirmAction {
     Purge(String),
 }
 
+/// 提示条样式：普通（深色胶囊）/ 成功（绿色底 + 勾选）。
+#[derive(Clone, Copy, PartialEq)]
+pub enum ToastKind {
+    Info,
+    Success,
+}
+
 pub struct Workspace {
     pub store: Store,
     docs: Vec<DocMeta>,
@@ -114,6 +121,9 @@ pub struct Workspace {
     switcher: Option<Switcher>,
     show_trash: bool,
     toast: Option<String>,
+    toast_kind: ToastKind,
+    /// 每次提示递增：作为动画元素的 id，保证同一条提示再次出现时动画从头开始
+    toast_gen: u64,
     toast_task: Option<Task<()>>,
     about: bool,
     more_menu: bool,
@@ -565,6 +575,7 @@ impl Workspace {
                 cx.notify();
             }
             EditorEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
+            EditorEvent::ToastSuccess(msg) => this.show_toast_ok(msg.clone(), cx),
             EditorEvent::OpenEmbed { kind, id } => {
                 let (kind, id) = (kind.clone(), id.clone());
                 window_defer_open(this, kind, id, cx);
@@ -621,6 +632,8 @@ impl Workspace {
             switcher: None,
             show_trash: false,
             toast: corrupt.map(|c| corrupt_msg(&c)),
+            toast_kind: ToastKind::Info,
+            toast_gen: 0,
             toast_task: None,
             about: false,
             more_menu: false,
@@ -741,8 +754,16 @@ impl Workspace {
         self.show_toast_for(msg, 2600, cx)
     }
 
+    /// 成功类提示（复制、保存等）：飞书同款绿色提示条。
+    pub fn show_toast_ok(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.show_toast_for(msg, 2200, cx);
+        self.toast_kind = ToastKind::Success;
+    }
+
     pub fn show_toast_for(&mut self, msg: String, ms: u64, cx: &mut Context<Self>) {
         self.toast = Some(crate::i18n::tr_owned(&msg));
+        self.toast_kind = ToastKind::Info;
+        self.toast_gen = self.toast_gen.wrapping_add(1);
         self.toast_task = Some(cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
             cx.background_executor().timer(Duration::from_millis(ms)).await;
             this.update(cx, |this, cx| {
@@ -2469,19 +2490,42 @@ impl Workspace {
 
     fn render_toast(&self, t: &Theme) -> Option<impl IntoElement> {
         let msg = self.toast.clone()?;
-        Some(
-            div().absolute().bottom(px(28.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .px(px(16.))
-                    .py(px(9.))
-                    .rounded(px(20.))
-                    .bg(if t.dark { rgb(0xe3e4e6) } else { rgb(0x1f2329) })
-                    .text_color(if t.dark { rgb(0x1f2329) } else { rgb(0xffffff) })
-                    .text_size(px(13.))
-                    .shadow_lg()
-                    .child(msg),
-            ),
-        )
+        let gen = self.toast_gen as usize;
+        // 飞书同款：顶部居中、从上往下滑入、成功提示是绿色底 + 勾选图标
+        let success = self.toast_kind == ToastKind::Success;
+        let (bg, border, fg, mark) = if success {
+            if t.dark {
+                (rgb(0x1e2b22), rgb(0x2f6b45), rgb(0xe6e8ea), rgb(0x3fbf7f))
+            } else {
+                (rgb(0xeaf9ef), rgb(0xa7e3bb), rgb(0x1f2329), rgb(0x2ba471))
+            }
+        } else if t.dark {
+            (rgb(0xe3e4e6), rgb(0xe3e4e6), rgb(0x1f2329), rgb(0x1f2329))
+        } else {
+            (rgb(0x1f2329), rgb(0x1f2329), rgb(0xffffff), rgb(0xffffff))
+        };
+        let card = div()
+            .px(px(16.))
+            .py(px(9.))
+            .rounded(px(10.))
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .shadow_lg()
+            .when(success, |d| {
+                d.child(div().size(px(18.)).rounded_full().bg(mark).flex().items_center().justify_center().child(icon("check", 12., gpui::white())))
+            })
+            .child(div().text_size(px(13.)).text_color(fg).child(msg));
+        Some(div().absolute().top(px(14.)).left_0().right_0().flex().justify_center().child(card.with_animation(
+            ("toast", gen),
+            // 三次缓出：起手快、收尾稳
+            Animation::new(Duration::from_millis(180)).with_easing(|d: f32| 1. - (1. - d).powi(3)),
+            move |d, delta| d.opacity(delta).mt(px(-10. * (1. - delta))),
+        )))
     }
 }
 
@@ -2567,7 +2611,16 @@ impl Render for Workspace {
                         .min_h(px(0.))
                         .flex()
                         .flex_row()
-                        .child(div().flex_1().min_w(px(0.)).h_full().child(self.editor.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .h_full()
+                                .relative()
+                                .child(self.editor.clone())
+                                // 提示条盖在正文区上方居中（不含侧栏），和飞书一致
+                                .children(self.render_toast(&t)),
+                        )
                         .when(show_outline, |d| d.child(self.render_outline(&t, cx)))
                         .when(comments_open, |d| d.child(self.render_comments_sidebar(&t, cx))),
                 ),
@@ -2583,7 +2636,6 @@ impl Render for Workspace {
             .children(self.render_present(window, cx))
             .children(self.render_graph(window, cx))
             .when_some(self.embed.as_ref().map(|e| e.0.clone()), |d, v| d.child(div().absolute().inset_0().occlude().child(v)))
-            .children(self.render_toast(&t))
     }
 }
 

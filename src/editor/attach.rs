@@ -828,7 +828,7 @@ impl Editor {
             .child(btn("att-copy", "link", "复制文件路径", false).on_click(cx.listener(move |this, _, _, cx| {
                 if let Some((path, _)) = this.attach_path(ix) {
                     cx.write_to_clipboard(ClipboardItem::new_string(path));
-                    cx.emit(EditorEvent::Toast("已复制文件路径".into()));
+                    cx.emit(EditorEvent::ToastSuccess("已复制文件路径".into()));
                 }
             })))
             .child(btn("att-reveal", "folder", "在访达中显示", false).on_click(cx.listener(move |this, _, _, cx| {

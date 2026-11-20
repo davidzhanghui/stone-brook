@@ -51,7 +51,7 @@ impl Editor {
         let text = convert::blocks_to_md(&refs);
         let html = convert::blocks_to_html(&refs);
         clipboard::write(&text, Some(&html), Some(&blocks_to_json(std::slice::from_ref(&blk))));
-        cx.emit(EditorEvent::Toast("已复制".into()));
+        cx.emit(EditorEvent::ToastSuccess("复制成功".into()));
         cx.notify();
     }
 
@@ -119,6 +119,10 @@ impl Editor {
             }
         }
         let assets = self.store.assets_dir();
+        let in_code = matches!(self.content.blocks[self.core.head.block].kind, BlockKind::Code { .. });
+        // 往代码块里粘贴：直接用纯文本。富文本还原会把缩进当排版空白折叠掉
+        //（来源是「每行一个 div」的网页代码块时尤其明显），而纯文本一般保留缩进。
+        let prefer_text = in_code && clip.text.as_deref().is_some_and(|t| !t.trim().is_empty());
         let mut source = "";
         let mut blocks: Vec<Block> = Vec::new();
         if !plain {
@@ -133,9 +137,11 @@ impl Editor {
                         }
                     }
                 }
-            } else if let Some(h) = clip.html.as_deref() {
-                blocks = convert::html_to_blocks(h, &assets);
-                source = "html";
+            } else if !prefer_text {
+                if let Some(h) = clip.html.as_deref() {
+                    blocks = convert::html_to_blocks(h, &assets);
+                    source = "html";
+                }
             }
             if blocks.is_empty() {
                 if let Some((bytes, ext)) = &clip.image {
@@ -149,7 +155,7 @@ impl Editor {
         if blocks.is_empty() {
             let Some(t) = clip.text else { return };
             let t = t.replace("\r\n", "\n");
-            if !plain && convert::looks_like_markdown(&t) {
+            if !plain && !in_code && convert::looks_like_markdown(&t) {
                 blocks = convert::md_to_blocks(&t);
                 source = "markdown";
             } else if t.contains('\n') && !self.content.blocks[self.core.head.block].kind.enter_is_newline() {

@@ -552,6 +552,9 @@ pub enum BlockKind {
         /// 自动换行：true 时长行折行显示，false 时单行显示并可横向滚动（默认换行，与旧数据一致）
         #[serde(default = "is_true_default", skip_serializing_if = "is_true")]
         wrap: bool,
+        /// 固定高度（逻辑像素）：拖过上/下边缘调整；None 表示随内容自适应。随文档保存
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
     Callout {
         emoji: String,

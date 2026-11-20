@@ -544,8 +544,9 @@ pub fn hscrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl I
             let thumb_w = (track_w * (view.size.width / (view.size.width + max))).max(px(28.));
             let scrolled = -handle.offset().x;
             let thumb_left = view.left() + inset + (track_w - thumb_w) * (scrolled / max);
-            let track = Bounds::new(point(view.left(), view.bottom() - px(10.)), size(view.size.width, px(10.)));
-            let thumb = Bounds::new(point(thumb_left, view.bottom() - px(8.)), size(thumb_w, px(5.)));
+            // 往上让 4px，给代码块底部的拖拽手柄留出空间
+            let track = Bounds::new(point(view.left(), view.bottom() - px(14.)), size(view.size.width, px(10.)));
+            let thumb = Bounds::new(point(thumb_left, view.bottom() - px(12.)), size(thumb_w, px(5.)));
             let active = drag.get().is_some();
             window.paint_quad(fill(thumb, color.opacity(if active { 0.75 } else { 0.5 })).corner_radii(px(2.5)));
             let per_px = max / (track_w - thumb_w).max(px(1.));

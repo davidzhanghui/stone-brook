@@ -14,6 +14,7 @@ mod audio;
 mod blocks;
 mod button;
 mod clip;
+pub(crate) mod codefold;
 mod countdown;
 mod fileview;
 pub(crate) mod fold;
@@ -206,6 +207,19 @@ pub struct DiagramDrag {
     pub moved: bool,
 }
 
+/// 拖动代码块下边缘调整高度。
+pub struct CodeHeightDrag {
+    pub block: usize,
+    /// 拖动开始时的正文高度
+    pub start_h: f32,
+    /// 拖动开始时的指针位置
+    pub start_y: Pixels,
+    /// 当前高度预览
+    pub height: f32,
+    /// 内容自然高度：拖到这个高度就等同于「自适应」
+    pub max_h: f32,
+}
+
 /// 拖动图片角上的手柄等比缩放。
 pub struct ImageDrag {
     pub block: usize,
@@ -337,6 +351,8 @@ pub struct TablePicker {
 pub enum EditorEvent {
     Changed,
     Toast(String),
+    /// 成功类提示（复制成功等）：绿色提示条
+    ToastSuccess(String),
     /// ⌘ + 点击了指向某篇文档的链接
     OpenDoc(String),
     /// 打开嵌入对象的全屏编辑器
@@ -420,6 +436,12 @@ pub struct RenderCaches {
     pub diagram_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
     /// 代码块关闭自动换行后的横向滚动状态（按块 id）
     pub code_scroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
+    /// 代码块高度受限后的纵向滚动状态（按块 id）
+    pub code_vscroll: RefCell<HashMap<u64, (ScrollHandle, crate::ui::ScrollDrag)>>,
+    /// 代码块正文的内容高度（不受固定高度影响），拖动下边缘时作起点/上限
+    pub code_body_h: Rc<RefCell<HashMap<u64, f32>>>,
+    /// 代码块折叠区间缓存：块 id → (文本哈希, 语言, 区间)
+    pub fold_spans: RefCell<HashMap<u64, (u64, String, Rc<Vec<codefold::FoldSpan>>)>>,
     /// 不换行空格宽度 / 字号（每帧测量）
     pub nbsp_w: std::cell::Cell<f32>,
     pub nbsp_measured: bool,
@@ -433,6 +455,8 @@ pub struct RenderCaches {
 pub struct DocSession {
     /// 当前鼠标所在的代码块 id（用于「同一时刻只有一个代码块显示边框」）
     pub hover_code: Option<u64>,
+    /// 代码块折叠状态：块 id → 已收起的折叠起始行
+    pub code_folds: HashMap<u64, std::collections::HashSet<usize>>,
     pub html_live: Option<u64>,
     pub video_full: Option<u64>,
     /// 「视频或文件」块的全屏预览（顶栏 退出 / 文件名 / 下载 + 下方内容）
@@ -443,6 +467,8 @@ pub struct DocSession {
     pub file_hover: Option<u64>,
     pub diagram_drag: Option<DiagramDrag>,
     pub image_drag: Option<ImageDrag>,
+    /// 正在拖动代码块下边缘调整高度
+    pub code_height_drag: Option<CodeHeightDrag>,
     /// 图片裁剪模式
     pub image_crop: Option<CropEdit>,
     /// 全屏查看大图
@@ -720,6 +746,16 @@ impl Editor {
         let layout = f.layouts.get(&slot)?;
         let d = f.maps.get(&slot).map_or(offset, |m| m.m2d(offset));
         layout.position_for_index(d)
+    }
+
+    /// 收起 / 展开代码块里以 `start_line` 开头的折叠区间。
+    pub fn toggle_code_fold(&mut self, b: usize, start_line: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.content.blocks.get(b).map(|x| x.id) else { return };
+        let set = self.sess.code_folds.entry(id).or_default();
+        if !set.remove(&start_line) {
+            set.insert(start_line);
+        }
+        cx.notify();
     }
 
     pub fn ordered_numbers(&mut self) -> &[usize] {

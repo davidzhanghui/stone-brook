@@ -627,7 +627,7 @@ pub fn md_to_blocks(md: &str) -> Vec<Block> {
                         CodeBlockKind::Fenced(l) => normalize_lang(&l),
                         CodeBlockKind::Indented => "Plain Text".into(),
                     };
-                    b.open(BlockKind::Code { lang, wrap: true }, 0);
+                    b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
                     in_code = true;
                 }
                 Tag::List(start) => {
@@ -885,7 +885,7 @@ pub fn plain_to_blocks(s: &str) -> Vec<Block> {
 
 pub fn html_to_blocks(html: &str, assets_dir: &Path) -> Vec<Block> {
     let doc = scraper::Html::parse_document(html);
-    let mut w = HtmlWalker { b: Builder::default(), lists: Vec::new(), quote: 0, assets_dir, callout: false };
+    let mut w = HtmlWalker { b: Builder::default(), lists: Vec::new(), quote: 0, assets_dir, callout: false, pre: false };
     w.walk(doc.root_element(), &Marks::default());
     w.b.flush();
     // 去掉首尾空段落
@@ -897,7 +897,10 @@ pub fn html_to_blocks(html: &str, assets_dir: &Path) -> Vec<Block> {
         blocks.pop();
     }
     for b in &mut blocks {
-        trim_rich(&mut b.text);
+        // 代码块的缩进属于内容本身，首尾空白同样要原样保留
+        if !matches!(b.kind, BlockKind::Code { .. }) {
+            trim_rich(&mut b.text);
+        }
     }
     blocks
 }
@@ -920,6 +923,8 @@ struct HtmlWalker<'a> {
     assets_dir: &'a Path,
     /// 正在飞书高亮块里：里层的 div 并进同一个高亮块（多行），不再各自成块
     callout: bool,
+    /// 正在代码/预格式区域里：空白原样保留，里层元素只当换行，不再各自成块
+    pre: bool,
 }
 
 /// 飞书高亮块的 `data-emoji-id` → 表情（常见的几十个；没收录的用 💡）。
@@ -1061,8 +1066,16 @@ impl<'a> HtmlWalker<'a> {
             match child.value() {
                 Node::Text(t) => {
                     let raw: &str = t;
-                    let pre = self.b.cur.as_ref().is_some_and(|c| matches!(c.kind, BlockKind::Code { .. }));
-                    if pre {
+                    // 预格式区域：只丢掉带换行的排版空白节点（源码里行与行之间的缩进），
+                    // 行内的空格原样保留
+                    if self.pre {
+                        if !(raw.trim().is_empty() && raw.contains('\n')) {
+                            self.b.push_raw(raw);
+                        }
+                        continue;
+                    }
+                    let in_code = self.b.cur.as_ref().is_some_and(|c| matches!(c.kind, BlockKind::Code { .. }));
+                    if in_code {
                         self.b.push_raw(raw);
                         continue;
                     }
@@ -1086,6 +1099,20 @@ impl<'a> HtmlWalker<'a> {
         self.lists.len().saturating_sub(1) as u8
     }
 
+    /// 把整个元素当成一段预格式代码收进一个代码块（`<pre>` 之外的各种代码容器）。
+    fn flush_code(&mut self, el: scraper::ElementRef, marks: &Marks) {
+        let lang = code_lang_from(el);
+        self.b.flush();
+        self.b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
+        self.pre = true;
+        self.walk(el, marks);
+        self.pre = false;
+        if let Some(cur) = &mut self.b.cur {
+            cur.text = RichText::plain(cur.text.text.trim_end_matches('\n'));
+        }
+        self.b.flush();
+    }
+
     fn element(&mut self, el: scraper::ElementRef, marks: &Marks) {
         let v = el.value();
         let name = v.name().to_ascii_lowercase();
@@ -1093,6 +1120,25 @@ impl<'a> HtmlWalker<'a> {
         let mut m = marks.clone();
         if let Some(style) = v.attr("style") {
             apply_style(style, &mut m);
+        }
+        // 预格式区域内部：不再分块，块级元素只负责换行，空白原样保留
+        if self.pre {
+            match name.as_str() {
+                "br" => self.b.push_raw("\n"),
+                "div" | "p" | "li" | "tr" | "section" | "article" | "figure" | "pre" => {
+                    if self.b.cur.as_ref().is_some_and(|c| !c.text.is_empty()) {
+                        self.b.push_raw("\n");
+                    }
+                    self.walk(el, &m);
+                }
+                _ => self.walk(el, &m),
+            }
+            return;
+        }
+        // 代码块的容器不止 <pre>：`white-space: pre*` 的 div、或常见代码编辑器/高亮器的类名
+        if name != "pre" && is_preformatted_container(el) {
+            self.flush_code(el, &m);
+            return;
         }
         match name.as_str() {
             "head" | "style" | "script" | "meta" | "title" | "noscript" | "svg" | "button" => {}
@@ -1187,21 +1233,18 @@ impl<'a> HtmlWalker<'a> {
                 self.quote -= 1;
             }
             "pre" => {
-                let all = || std::iter::once(el).chain(el.descendants().filter_map(scraper::ElementRef::wrap));
-                // 飞书：data-lark-language；其他站点：data-lang / data-language / class="language-xx"
-                let lang = all()
-                    .find_map(|e| ["data-lark-language", "data-lang", "data-language"].iter().find_map(|k| e.value().attr(k).map(str::to_string)))
-                    .or_else(|| {
-                        all()
-                            .filter_map(|e| e.value().attr("class").map(|c| c.to_string()))
-                            .find_map(|c| c.split_whitespace().find_map(|p| p.strip_prefix("language-").map(|s| s.to_string())))
-                    })
-                    .map(|l| normalize_lang(&l))
-                    .unwrap_or_else(|| "Plain Text".into());
-                let text: String = el.text().collect();
-                self.b.open(BlockKind::Code { lang, wrap: true }, 0);
-                self.b.push_raw(text.trim_end_matches('\n'));
-                self.b.flush();
+                // <pre> 里面再用 div/p 分行（部分编辑器、旧版 GitHub）：走预格式遍历，
+                // 否则 el.text() 会把各行拼在一起
+                let div_lines = el.children().filter_map(scraper::ElementRef::wrap).any(|c| matches!(c.value().name(), "div" | "p"));
+                if div_lines {
+                    self.flush_code(el, &m);
+                } else {
+                    let lang = code_lang_from(el);
+                    let text: String = el.text().collect();
+                    self.b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
+                    self.b.push_raw(text.trim_end_matches('\n'));
+                    self.b.flush();
+                }
             }
             "hr" => {
                 self.b.flush();
@@ -1228,7 +1271,7 @@ impl<'a> HtmlWalker<'a> {
                 for tr in el.descendants().filter_map(scraper::ElementRef::wrap).filter(|e| e.value().name() == "tr") {
                     let mut row = Vec::new();
                     for cell in tr.children().filter_map(scraper::ElementRef::wrap).filter(|e| matches!(e.value().name(), "td" | "th")) {
-                        let mut sub = HtmlWalker { b: Builder::default(), lists: vec![], quote: 0, assets_dir: self.assets_dir, callout: false };
+                        let mut sub = HtmlWalker { b: Builder::default(), lists: vec![], quote: 0, assets_dir: self.assets_dir, callout: false, pre: false };
                         let mut cm = Marks::default();
                         if let Some(style) = cell.value().attr("style") {
                             apply_style(style, &mut cm);
@@ -1313,6 +1356,52 @@ fn has_block_child(el: scraper::ElementRef) -> bool {
                 | "img"
         )
     })
+}
+
+/// 代码块语言：飞书 `data-lark-language`；其他站点 `data-lang` / `data-language` / `class="language-xx"`。
+fn code_lang_from(el: scraper::ElementRef) -> String {
+    let all = || std::iter::once(el).chain(el.descendants().filter_map(scraper::ElementRef::wrap));
+    all()
+        .find_map(|e| ["data-lark-language", "data-lang", "data-language"].iter().find_map(|k| e.value().attr(k).map(str::to_string)))
+        .or_else(|| {
+            all()
+                .filter_map(|e| e.value().attr("class").map(|c| c.to_string()))
+                .find_map(|c| c.split_whitespace().find_map(|p| p.strip_prefix("language-").map(|s| s.to_string())))
+        })
+        .map(|l| normalize_lang(&l))
+        .unwrap_or_else(|| "Plain Text".into())
+}
+
+/// 看起来是代码块容器：`white-space: pre*`，或代码编辑器 / 高亮器的类名。
+/// 这类容器里的空白是格式的一部分，不能按正文规则折叠。
+fn is_preformatted_container(el: scraper::ElementRef) -> bool {
+    let v = el.value();
+    if let Some(style) = v.attr("style") {
+        let pre_ws = style.split(';').any(|decl| {
+            decl.split_once(':').is_some_and(|(k, val)| k.trim().eq_ignore_ascii_case("white-space") && val.trim().to_ascii_lowercase().starts_with("pre"))
+        });
+        if pre_ws {
+            return true;
+        }
+    }
+    let class = v.attr("class").unwrap_or("").to_ascii_lowercase();
+    const HINTS: [&str; 14] = [
+        "code-block",
+        "codeblock",
+        "code-line",
+        "hljs",
+        "shiki",
+        "prism-code",
+        "blob-code",
+        "view-line",
+        "view-lines",
+        "cm-line",
+        "cm-content",
+        "cm-editor",
+        "source-code",
+        "monaco-editor",
+    ];
+    HINTS.iter().any(|h| class.contains(h))
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -1439,7 +1528,7 @@ mod tests {
         let p = &blocks[1].text;
         assert!(p.spans.iter().any(|s| s.marks.bold));
         assert!(p.spans.iter().any(|s| s.marks.color == 1));
-        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into(), wrap: true });
+        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into(), wrap: true, height: None });
     }
 
     #[test]
@@ -1541,5 +1630,70 @@ mod tests {
         assert!(matches!(&kinds[3].0, BlockKind::Code { lang, .. } if lang.eq_ignore_ascii_case("python")), "{kinds:#?}");
         assert_eq!(bs.len(), 4, "{kinds:#?}");
         assert!(bs[2].text.runs().all(|(_, m)| m.bg == 0), "高亮块底色不应变成文字底色");
+    }
+
+    #[test]
+    fn html_import_code_div_lines_keeps_indent() {
+        // 每行一个 div 的代码块（Notion / 代码编辑器 / 旧版 GitHub 等）：缩进与空行都要保留
+        let html = "<div class=\"code-block\">\
+            <div class=\"code-line\">{</div>\
+            <div class=\"code-line\">  \"mcpServers\": {</div>\
+            <div class=\"code-line\"></div>\
+            <div class=\"code-line\">    \"args\": [</div>\
+            <div class=\"code-line\">      \"-y\"</div>\
+            <div class=\"code-line\">    ]</div>\
+            <div class=\"code-line\">  }</div>\
+            <div class=\"code-line\">}</div></div>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1, "{:?}", bs.iter().map(|b| &b.kind).collect::<Vec<_>>());
+        assert!(matches!(bs[0].kind, BlockKind::Code { .. }), "{:?}", bs[0].kind);
+        assert_eq!(bs[0].text.text, "{\n  \"mcpServers\": {\n\n    \"args\": [\n      \"-y\"\n    ]\n  }\n}");
+    }
+
+    #[test]
+    fn html_import_white_space_pre_container() {
+        // 用 white-space: pre-wrap 保留换行的 div（编辑器/聊天窗口常见）
+        let html = "<div style=\"white-space: pre-wrap\">{\n  \"a\": 1,\n  \"b\": [\n    true\n  ]\n}</div>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1);
+        assert!(matches!(bs[0].kind, BlockKind::Code { .. }));
+        assert_eq!(bs[0].text.text, "{\n  \"a\": 1,\n  \"b\": [\n    true\n  ]\n}");
+    }
+
+    #[test]
+    fn html_import_pre_keeps_first_line_indent() {
+        // 代码块整体不能再被 trim_rich 削掉首行缩进
+        let html = "<pre class=\"language-json\">  \"a\": 1\n    \"b\": 2</pre>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].text.text, "  \"a\": 1\n    \"b\": 2");
+    }
+
+    #[test]
+    fn html_import_pre_with_div_lines() {
+        let html = "<pre class=\"language-json\"><div>{</div><div>  \"a\": 1</div><div>}</div></pre>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1);
+        assert!(matches!(&bs[0].kind, BlockKind::Code { lang, .. } if lang.eq_ignore_ascii_case("json")));
+        assert_eq!(bs[0].text.text, "{\n  \"a\": 1\n}");
+    }
+
+    #[test]
+    fn html_import_code_line_keeps_inline_spans_together() {
+        // 行内的 span / code 不能额外换行
+        let html = "<div class=\"code-block\"><div class=\"code-line\">a <span class=\"hljs-string\">b</span> <code>c</code></div><div class=\"code-line\">  d</div></div>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].text.text, "a b c\n  d");
+    }
+
+    #[test]
+    fn html_import_prose_still_collapses_ws() {
+        // 普通正文不受影响：空白仍按 HTML 规则折叠，不会误判成代码块
+        let html = "<p>hello     world\n   next</p>";
+        let bs = html_to_blocks(html, Path::new("/tmp"));
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].kind, BlockKind::Text);
+        assert_eq!(bs[0].text.text, "hello world next");
     }
 }

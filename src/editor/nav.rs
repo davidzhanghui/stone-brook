@@ -412,6 +412,14 @@ impl Editor {
         // 点击行内公式：打开公式编辑浮层
         if let Some(m) = &map {
             if let Ok(i) = layout.index_for_position(ev.position) {
+                // 点击折叠占位「⋯」：展开
+                if let Some(off) = m.fold_at(i) {
+                    if let Some(blk) = self.content.blocks.get(b) {
+                        let line = crate::editor::codefold::line_of_offset(&blk.text.text, off);
+                        self.toggle_code_fold(b, line, cx);
+                        return;
+                    }
+                }
                 if let Some(start) = m.formula_at(i) {
                     let tex = self.slot_text((b, c)).and_then(|t| t.math_spans().into_iter().find(|f| f.0 == start)).map(|f| f.1).unwrap_or_default();
                     self.core.head = Pos::new(b, c, start);
@@ -477,6 +485,18 @@ impl Editor {
             self.diagram_drag_move(ev.position, cx);
             return;
         }
+        // 代码块高度
+        if let Some(d) = self.sess.code_height_drag.as_mut() {
+            if ev.pressed_button == Some(MouseButton::Left) {
+                let dy = f32::from(ev.position.y - d.start_y);
+                d.height = (d.start_h + dy).clamp(super::render::CODE_MIN_H, d.max_h);
+                cx.notify();
+            } else {
+                // 在窗口外松开了鼠标：当作结束
+                self.end_code_height_drag(cx);
+            }
+            return;
+        }
         // 表格列宽
         if self.sess.table_col_drag.is_some() {
             if ev.pressed_button == Some(MouseButton::Left) {
@@ -532,6 +552,7 @@ impl Editor {
         self.diagram_drag_end(cx);
         self.end_table_col_drag(cx);
         self.end_image_drag(cx);
+        self.end_code_height_drag(cx);
         if let Some(c) = self.sess.image_crop.as_mut() {
             c.drag = None;
         }
@@ -539,6 +560,18 @@ impl Editor {
             self.core.selecting = false;
             cx.notify();
         }
+    }
+
+    /// 松开代码块下边缘：把高度写进块（随文档保存）；拖回内容高度视为恢复自适应。
+    fn end_code_height_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.sess.code_height_drag.take() else { return };
+        // 只是点了一下（没拖动）：不改高度
+        if (d.height - d.start_h).abs() < 2. {
+            return;
+        }
+        // 拖回内容高度（或更低）视为恢复自适应；拖到最小高度仍保持固定高度
+        let h = d.height.round();
+        self.set_code_height(d.block, if h >= d.max_h - 1. { None } else { Some(h) }, cx);
     }
 
     /// 松开缩放手柄：只点了一下没拖时，不把「自动宽度」钉成固定值，也不记撤销。
