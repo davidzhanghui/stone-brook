@@ -12,7 +12,7 @@
 
 - 版本 **2.4.0**，仅支持 macOS 12+（依赖 AppKit、WKWebView、AVFoundation）
 - 完整功能清单：[docs/FEATURES.md](docs/FEATURES.md)
-- 官网：<https://davidzhanghui.github.io/stone-book/>
+- 官网：<https://davidzhanghui.github.io/stone-brook/>
 
 <p align="center">
   <a href="docs/stonebrook-promo-v2.2.mp4"><img src="docs/stonebrook-promo-poster.jpg" width="720" alt="石渠宣传片"></a><br>

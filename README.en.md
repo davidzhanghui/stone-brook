@@ -14,7 +14,7 @@ No account, no cloud. Everything lives in one SQLite file on your machine (only 
 - Version **2.4.0**. macOS 12+ only (AppKit, WKWebView, AVFoundation).
 - The English UI covers the main window (sidebar, menus, command palette, settings, slash menu, toolbars). The full-screen board, spreadsheet, and database editors are not translated yet and still show Chinese.
 - Full feature list (Chinese): [docs/FEATURES.md](docs/FEATURES.md)
-- Website (Chinese): <https://davidzhanghui.github.io/stone-book/>
+- Website (Chinese): <https://davidzhanghui.github.io/stone-brook/>
 
 <p align="center">
   <a href="docs/stonebrook-promo-v2.2.mp4"><img src="docs/stonebrook-promo-poster.jpg" width="720" alt="Stonebrook promo film"></a><br>
