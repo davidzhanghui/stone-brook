@@ -1391,6 +1391,57 @@ impl Editor {
                     .child(
                         div().id(("code-body", blk.id as usize)).w_full().when_some(body_h, |d, h| d.h(px(h)).overflow_y_scroll().track_scroll(&vh)).child(row),
                     )
+                    // 飞书同款滚轮分发：指针在代码块上时，滚轮先滚块内；块滚到顶/底才把滚动交给外层文档。
+                    // GPUI 的 List 在冒泡阶段无条件滚动，块内滚动句柄也在冒泡阶段生效，两者会同时滚；
+                    // 这里用捕获阶段抢占，块内还能滚时吃掉事件（手动改偏移），到边界再放行。
+                    .when_some(body_h, |d, _| {
+                        let v = vh.clone();
+                        let hx = scroll.as_ref().map(|(h, _)| h.clone());
+                        let over = hovered;
+                        d.child(
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    let view = window.current_view();
+                                    window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
+                                        if phase != DispatchPhase::Capture || !over || !bounds.contains(&ev.position) {
+                                            return;
+                                        }
+                                        let delta = ev.delta.pixel_delta(window.line_height());
+                                        if delta.y.is_zero() {
+                                            return;
+                                        }
+                                        let max = v.max_offset().height;
+                                        if max <= px(0.5) {
+                                            return;
+                                        }
+                                        let off = v.offset();
+                                        let cur = -off.y;
+                                        let down = delta.y < px(0.);
+                                        let at_edge = if down { cur >= max - px(0.5) } else { cur <= px(0.5) };
+                                        if at_edge {
+                                            return; // 已到边界：放行，让外层文档接着滚
+                                        }
+                                        v.set_offset(point(off.x, -(cur - delta.y).clamp(px(0.), max)));
+                                        // 触控板斜向手势：横向一并滚内部横向滚动条（关闭自动换行时才有）
+                                        if let Some(h) = hx.as_ref().filter(|_| !delta.x.is_zero()) {
+                                            let max_x = h.max_offset().width;
+                                            if max_x > px(0.5) {
+                                                let o = h.offset();
+                                                h.set_offset(point(-(-o.x - delta.x).clamp(px(0.), max_x), o.y));
+                                            }
+                                        }
+                                        cx.stop_propagation();
+                                        cx.notify(view);
+                                    });
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
+                    })
                     .when_some(body_h, |d, _| d.child(crate::ui::scrollbar(vh.clone(), vd.clone(), t.text_muted)))
                     .child(
                         div()

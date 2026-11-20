@@ -12,7 +12,9 @@
 //!   rclick X Y [N] / rmove X Y  投递真实 NSEvent 鼠标点击 / 移动
 //!   drag X1 Y1 X2 Y2     拖拽（文本选择）
 //!   rdrag X1 Y1 X2 Y2    真实鼠标拖拽（按下→拖动→抬起，用于手柄类交互）
-//!   scroll DY            滚动
+//!   scroll DY            滚动（直接滚文档列表）
+//!   wheel X Y DY         在窗口坐标投递一次滚轮事件（走命中测试与捕获/冒泡分发，测滚动链）
+//!   codescroll           打印文档列表与每个代码块的滚动偏移
 //!   html 文件路径          把 HTML 文件放进剪贴板（模拟从网页复制）
 //!   htmlfile 文件路径      把 HTML 文件设为光标所在 HTML 块的内容（模拟上传）
 //!   codelang JavaScript  设置代码块语言 / foldline N 折叠第 N 行（0 起）
@@ -388,6 +390,33 @@ static COMMANDS: &[(&[&str], Cmd)] = &[
             e.list.scroll_by(px(nums[0]));
             cx.notify();
         });
+    }),
+    // wheel X Y DY：在窗口坐标投递一次真实滚轮事件（走命中测试与捕获/冒泡分发，测内层滚动与文档滚动链）
+    (&["wheel"], |_, arg, nums, _, window, cx| {
+        if nums.len() >= 3 {
+            window.dispatch_scroll_wheel(
+                ScrollWheelEvent {
+                    position: point(px(nums[0]), px(nums[1])),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(nums[2]))),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                },
+                cx,
+            );
+        }
+    }),
+    // codescroll：打印文档列表与每个代码块的滚动偏移（验证滚动链）
+    (&["codescroll"], |_, _, _, ws, _, cx| {
+        let e = ws.read(cx).editor().read(cx);
+        let top = e.list.logical_scroll_top();
+        println!("DOC top={} off={:?}", top.item_ix, top.offset_in_item);
+        for (i, b) in e.content.blocks.iter().enumerate() {
+            if matches!(&b.kind, crate::model::BlockKind::Code { .. }) {
+                if let Some((h, _)) = e.caches.code_vscroll.borrow().get(&b.id) {
+                    println!("CODESCROLL b={i} off={:?} max={:?}", h.offset(), h.max_offset());
+                }
+            }
+        }
     }),
     (&["action"], |cmd, arg, nums, ws, window, cx| {
         if let Ok(a) = cx.build_action(arg, None) {

@@ -3674,6 +3674,12 @@ impl Window {
         }
     }
 
+    /// Dispatch a scroll wheel event, discarding the dispatch result.
+    /// Intended for scripted end-to-end tests that need to inject real wheel events.
+    pub fn dispatch_scroll_wheel(&mut self, event: crate::ScrollWheelEvent, cx: &mut App) {
+        self.dispatch_event(PlatformInput::ScrollWheel(event), cx);
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         let hit_test = self.rendered_frame.hit_test(self.mouse_position());
         if hit_test != self.mouse_hit_test {
