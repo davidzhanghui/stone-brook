@@ -486,6 +486,38 @@ pub fn fmt_comment_time(ms: i64) -> String {
 
 use chrono::Datelike;
 
+/// 标题下的时间标签（对齐飞书）：修改时间用「今天修改 / 昨天修改 / 10月25日修改」，
+/// 创建时间始终给具体日期「10月25日创建 / 2024年10月25日创建」。
+/// `created` 为真表示创建时间，否则是最后修改时间。
+pub fn fmt_meta_time(ms: i64, created: bool) -> String {
+    fmt_meta_time_at(ms, created, chrono::Local::now(), crate::i18n::english())
+}
+
+/// 同 `fmt_meta_time`，`now` 与语言显式传入，便于测试。
+fn fmt_meta_time_at(ms: i64, created: bool, now: chrono::DateTime<chrono::Local>, english: bool) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(dt) = Local.timestamp_millis_opt(ms).single() else { return String::new() };
+    let days = (now.date_naive() - dt.date_naive()).num_days().max(0);
+    // 只有修改时间用相对说法；创建时间一律落到具体日期
+    let relative = (!created && days <= 1).then_some(days);
+    if english {
+        let verb = if created { "Created" } else { "Edited" };
+        return match relative {
+            Some(0) => format!("{verb} today"),
+            Some(_) => format!("{verb} yesterday"),
+            None if dt.year() == now.year() => format!("{verb} {} {}", dt.format("%b"), dt.day()),
+            None => format!("{verb} {} {}, {}", dt.format("%b"), dt.day(), dt.year()),
+        };
+    }
+    let verb = if created { "创建" } else { "修改" };
+    match relative {
+        Some(0) => format!("今天{verb}"),
+        Some(_) => format!("昨天{verb}"),
+        None if dt.year() == now.year() => format!("{}月{}日{verb}", dt.month(), dt.day()),
+        None => format!("{}年{}月{}日{verb}", dt.year(), dt.month(), dt.day()),
+    }
+}
+
 // ───────────── 评论浮层 ─────────────
 
 impl Editor {
@@ -704,5 +736,35 @@ mod crop_tests {
         let r = crop_drag_rect(CropHandle::NW, (0.1, 0.1, 0.5, 0.5), -1., -1.);
         assert_eq!((r.0, r.1), (0., 0.));
         assert!((r.2 - 0.6).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod meta_time_tests {
+    use super::fmt_meta_time_at;
+    use chrono::{Local, TimeZone};
+
+    fn at(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    /// 标题下时间标签：修改时间今天 / 昨天 / 同年月日 / 跨年月日；创建时间始终是具体日期。
+    #[test]
+    fn labels_follow_feishu_shape() {
+        let now = at(2026, 11, 20, 15);
+        let ms = |dt: &chrono::DateTime<Local>| dt.timestamp_millis();
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 20, 9)), false, now, false), "今天修改");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 19, 23)), false, now, false), "昨天修改");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 3, 2, 9)), false, now, false), "3月2日修改");
+        assert_eq!(fmt_meta_time_at(ms(&at(2025, 10, 25, 9)), false, now, false), "2025年10月25日修改");
+        // 创建时间即使是今天 / 昨天也落到具体日期
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 20, 9)), true, now, false), "11月20日创建");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 19, 23)), true, now, false), "11月19日创建");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 10, 10, 9)), true, now, false), "10月10日创建");
+        assert_eq!(fmt_meta_time_at(ms(&at(2025, 10, 25, 9)), true, now, false), "2025年10月25日创建");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 20, 9)), false, now, true), "Edited today");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 11, 20, 9)), true, now, true), "Created Nov 20");
+        assert_eq!(fmt_meta_time_at(ms(&at(2026, 10, 25, 9)), true, now, true), "Created Oct 25");
+        assert_eq!(fmt_meta_time_at(ms(&at(2025, 10, 25, 9)), false, now, true), "Edited Oct 25, 2025");
     }
 }

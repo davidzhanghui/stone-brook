@@ -620,7 +620,7 @@ impl Workspace {
                     )
                     .child(div().mt_5().text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("评论")))
                     .child(
-                        row("评论作者名", "添加评论时显示的名字").child(
+                        row("作者名", "显示在评论和文档标题下方").child(
                             div()
                                 .w(px(200.))
                                 .px_2()

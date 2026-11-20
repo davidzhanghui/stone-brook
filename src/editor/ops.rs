@@ -2008,11 +2008,16 @@ impl Editor {
         let len = self.slot_len(slot);
         let (s, e) = self.sel();
         let whole_slot = s == Pos::new(slot.0, slot.1, 0) && e == Pos::new(slot.0, slot.1, len);
-        if whole_slot || s.slot() != e.slot() || len == 0 {
-            // 聚焦时只选聚焦的子树；终点落在最后一个可见块上（折叠的子项随父项一起被选中）
-            let (first, end) = match self.focus_ix() {
+        let first_body = self.body_first();
+        if slot.0 < first_body {
+            // 光标在标题里：只选标题本身（再按也停在这里，不会把正文卷进来）
+            self.core.anchor = Pos::new(slot.0, 0, 0);
+            self.core.head = self.slot_end(slot.0);
+        } else if whole_slot || s.slot() != e.slot() || len == 0 {
+            // 聚焦时只选聚焦的子树（标题除外）；终点落在最后一个可见块上（折叠的子项随父项一起被选中）
+            let (first, end) = match self.focus_ix().filter(|r| *r >= first_body) {
                 Some(r) => (r, super::fold::subtree(&self.content.blocks, r).end.max(r + 1)),
-                None => (0, self.content.blocks.len()),
+                None => (first_body, self.content.blocks.len()),
             };
             let last = self.visible_from(end - 1, false).filter(|l| *l >= first).unwrap_or(first);
             self.core.anchor = Pos::new(first, 0, 0);

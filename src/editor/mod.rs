@@ -50,7 +50,7 @@ pub use media::fmt_comment_time;
 pub use render::fmt_num;
 
 use crate::line_input::{InputEvent, LineInput};
-use crate::model::{Block, DocContent, Marks, RichText};
+use crate::model::{Block, BlockKind, DocContent, Marks, RichText};
 use crate::store::Store;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -530,6 +530,8 @@ pub struct Editor {
     pub find: Option<FindState>,
     pub show_perf: bool,
     dirty: bool,
+    /// 标题下展示的创建 / 最后修改时间（毫秒），来自 docs 表；库里没有这篇文档时都取当前时间
+    doc_times: (i64, i64),
     save_task: Option<Task<()>>,
     _blink: Task<()>,
     pub typed_today: usize,
@@ -591,6 +593,10 @@ impl Editor {
         for c in &mut comments {
             c.block_id = content.blocks.get(c.block).map_or(0, |b| b.id);
         }
+        let doc_times = store.times(&doc_id).unwrap_or_else(|| {
+            let now = crate::store::now_ms();
+            (now, now)
+        });
         Editor {
             doc_id,
             doc_list: Default::default(),
@@ -606,6 +612,7 @@ impl Editor {
             find: None,
             show_perf: false,
             dirty: false,
+            doc_times,
             save_task: None,
             _blink: blink,
             typed_today: 0,
@@ -635,6 +642,9 @@ impl Editor {
     pub fn load(&mut self, doc_id: String, content: DocContent, cx: &mut Context<Self>) {
         self.save_now(cx);
         self.doc_id = doc_id;
+        // 标题下的元信息跟着换文档
+        let now = crate::store::now_ms();
+        self.doc_times = self.store.times(&self.doc_id).unwrap_or((now, now));
         self.content = content;
         self.pull_sync();
         let n = self.content.blocks.len();
@@ -671,6 +681,15 @@ impl Editor {
 
     pub fn slot_len(&self, slot: (usize, usize)) -> usize {
         self.slot_text(slot).map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// 正文第一个块：第 0 块是标题时从 1 开始（对齐飞书：标题是独立区域，正文的全选 / 选到开头都不波及它）。
+    pub fn body_first(&self) -> usize {
+        if self.content.blocks.first().is_some_and(|b| b.kind == BlockKind::Title) {
+            1.min(self.content.blocks.len().saturating_sub(1))
+        } else {
+            0
+        }
     }
 
     /// 每个块至少有一个「光标停靠位」（空块如分割线 / 图片也能被选中）。
@@ -936,6 +955,8 @@ impl Editor {
         self.push_sync();
         self.flush_stats();
         self.store.save(&self.doc_id, &self.content);
+        // 写库同步刷新「最后修改」时间，标题下的元信息不必等下次打开文档
+        self.doc_times.1 = crate::store::now_ms();
     }
 
     pub fn is_saved(&self) -> bool {

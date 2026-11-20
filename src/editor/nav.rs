@@ -277,7 +277,10 @@ impl Editor {
         self.mv(p, false, cx)
     }
     pub fn select_doc_start(&mut self, _: &SelectDocStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.mv(Pos::default(), true, cx)
+        // 正文里 ⇧⌘↑ 只选到正文首块，标题是独立区域（对齐飞书）；光标在标题里才选到标题开头
+        let first_body = self.body_first();
+        let p = if self.core.head.block >= first_body { Pos::new(first_body, 0, 0) } else { Pos::default() };
+        self.mv(p, true, cx)
     }
     pub fn select_doc_end(&mut self, _: &SelectDocEnd, _: &mut Window, cx: &mut Context<Self>) {
         let p = self.slot_end(self.content.blocks.len() - 1);

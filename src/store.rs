@@ -530,6 +530,11 @@ impl Store {
         })
     }
 
+    /// 文档的创建 / 最后修改时间（毫秒时间戳）。文档不存在（如测试里的临时 id）时返回 `None`。
+    pub fn times(&self, id: &str) -> Option<(i64, i64)> {
+        self.row("SELECT created, updated FROM docs WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+
     /// 读取文档。JSON 损坏时把原文备份到 `recovery/` 目录，返回一篇说明情况的文档和 `Corrupt`。
     pub fn load(&self, id: &str) -> Option<(DocContent, Option<Corrupt>)> {
         let raw: String = self.row("SELECT content FROM docs WHERE id = ?1", [id], |r| r.get(0))?;

@@ -104,7 +104,8 @@ impl Render for DragPreview {
 
 fn spacing(kind: &BlockKind) -> (f32, f32) {
     match kind {
-        BlockKind::Title => (56., 18.),
+        // 标题下方紧跟着元信息行（作者 / 时间），块底留白由元信息行撑开，这里只留一点
+        BlockKind::Title => (56., 6.),
         BlockKind::Heading { level: 1 } => (22., 6.),
         BlockKind::Heading { level: 2 } => (18., 4.),
         BlockKind::Heading { .. } => (14., 2.),
@@ -591,6 +592,37 @@ impl Editor {
         .size_full()
     }
 
+    /// 标题下的元信息行（对齐飞书）：头像 + 作者、最后修改时间、创建时间。
+    fn render_doc_meta(&self, t: &Theme) -> Div {
+        let author = crate::settings::author();
+        let initial = author.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "我".to_string());
+        div()
+            .mt(px(10.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.5))
+            .child(
+                div()
+                    .size(px(20.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(t.accent)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::white())
+                    .child(initial),
+            )
+            .child(div().text_color(t.text_secondary).child(author))
+            .child(div().mx(px(4.)).w(px(1.)).h(px(10.)).bg(t.border_strong))
+            .child(div().text_color(t.text_muted).child(media::fmt_meta_time(self.doc_times.1, false)))
+            .child(div().ml(px(8.)).text_color(t.text_muted).child(media::fmt_meta_time(self.doc_times.0, true)))
+    }
+
     pub(super) fn render_block(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(blk) = self.content.blocks.get(ix).cloned() else {
             return div().into_any_element();
@@ -617,7 +649,9 @@ impl Editor {
             BlockKind::Title => {
                 row_lh = 48.;
                 let spec = SlotSpec { size: 34., line_h: 48., weight: FontWeight::BOLD, placeholder: Some("请输入标题".into()), ..SlotSpec::body(&t) };
-                self.render_slot(ix, 0, &blk.text, spec, focused, &t).on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)).into_any_element()
+                let title = self.render_slot(ix, 0, &blk.text, spec, focused, &t).on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx));
+                // 标题下：作者、最后修改与创建时间（对齐飞书）
+                div().flex().flex_col().child(title).child(self.render_doc_meta(&t)).into_any_element()
             }
             BlockKind::Text => {
                 let spec = SlotSpec { placeholder: empty_here.then(|| "输入「/」快速插入内容".into()), ..SlotSpec::body(&t) };

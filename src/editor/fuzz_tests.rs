@@ -18,8 +18,8 @@
 
 use super::{
     Backspace, Bold, Copy, Cut, Delete, DeleteWordBack, DocEnd, DocStart, DuplicateBlock, Editor, Enter, InlineCode, Italic, LineEnd, LineStart, MoveBlockDown,
-    MoveBlockUp, MoveLeft, MoveRight, Paste, PastePlain, Pos, Redo, SelectAll, SelectLeft, SelectRight, SelectWordLeft, ShiftTab, SoftEnter, Strike, Tab,
-    ToggleTodo, Underline, Undo, WordLeft, WordRight,
+    MoveBlockUp, MoveLeft, MoveRight, Paste, PastePlain, Pos, Redo, SelectAll, SelectDocStart, SelectLeft, SelectRight, SelectWordLeft, ShiftTab, SoftEnter,
+    Strike, Tab, ToggleTodo, Underline, Undo, WordLeft, WordRight,
 };
 use crate::model::{fix_merges, Block, BlockKind, CellMerge, DocContent, Marks, RichText, Span, TimelineItem};
 use gpui::{TestAppContext, Window};
@@ -679,6 +679,66 @@ fn random_edits_keep_the_document_valid(cx: &mut TestAppContext) {
     for seed in range {
         run_seed(seed, steps, &store, cx);
     }
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 全选与飞书对齐：标题（第 0 块）是独立区域——正文里全选不含标题，标题里全选只选标题。
+#[gpui::test]
+fn select_all_skips_title(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-select-all-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "select-all".into(), seed_doc(), cx));
+    win.update(cx, |ed, window, cx| {
+        let n = ed.content.blocks.len();
+        // 正文里全选：两次（先选当前块，再选全部正文），都不应包含标题
+        ed.set_cursor(Pos::new(1, 0, 0), false, cx);
+        ed.select_all(&SelectAll, window, cx);
+        ed.select_all(&SelectAll, window, cx);
+        assert_eq!(ed.core.anchor.block, 1, "全选不应包含标题");
+        assert_eq!(ed.core.head.block, n - 1);
+        // 再按一次也停在正文，不会把标题卷进来
+        ed.select_all(&SelectAll, window, cx);
+        assert_eq!(ed.core.anchor.block, 1, "重复全选不应包含标题");
+
+        // 标题里全选：只选标题，重复按也不扩散到正文
+        ed.set_cursor(Pos::new(0, 0, 0), false, cx);
+        ed.select_all(&SelectAll, window, cx);
+        ed.select_all(&SelectAll, window, cx);
+        assert_eq!(ed.core.anchor, Pos::new(0, 0, 0));
+        assert_eq!(ed.core.head.block, 0, "标题里全选不应波及正文");
+        assert_eq!(ed.core.head.offset, ed.slot_len((0, 0)));
+    })
+    .unwrap();
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 与飞书对齐：正文里 ⇧⌘↑ 只选到正文首块（标题不进选区），光标在标题里才选到标题开头。
+#[gpui::test]
+fn select_to_doc_start_stops_at_body(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-select-start-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "select-start".into(), seed_doc(), cx));
+    win.update(cx, |ed, window, cx| {
+        ed.set_cursor(Pos::new(3, 0, 0), false, cx);
+        ed.select_doc_start(&SelectDocStart, window, cx);
+        assert_eq!(ed.core.head, Pos::new(1, 0, 0), "正文里 ⇧⌘↑ 应停在正文首块");
+        assert_eq!(ed.core.anchor, Pos::new(3, 0, 0));
+
+        ed.set_cursor(Pos::new(0, 0, 2), false, cx);
+        ed.select_doc_start(&SelectDocStart, window, cx);
+        assert_eq!(ed.core.head, Pos::new(0, 0, 0), "标题里 ⇧⌘↑ 仍选到标题开头");
+    })
+    .unwrap();
     store.flush();
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);

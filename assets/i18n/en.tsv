@@ -127,8 +127,8 @@ Rust + GPUI，Metal 直接绘制，百万字不卡顿	Rust + GPUI drawn with Met
 宽版适合表格、图表较多的文档	Wide suits documents with many tables and diagrams
 标准	Standard
 宽版	Wide
-评论作者名	Comment author
-添加评论时显示的名字	Name shown on your comments
+作者名	Author name
+显示在评论和文档标题下方	Shown on comments and under the document title
 隐私	Privacy
 允许联网	Allow network access
 用于网页卡片抓取标题和封面、检查应用更新；关闭后石渠完全离线	Used to fetch titles and covers for link cards and to check for updates; turn off to stay fully offline
