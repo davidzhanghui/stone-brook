@@ -72,7 +72,15 @@ pub fn slash_items() -> Vec<SlashItem> {
         it("基础", Tx("H4"), 0x3b6cf6, "四级标题", "####", "h4 heading bt biaoti", SlashAction::Kind(Heading { level: 4 })),
         it("基础", Svg("list-ordered"), 0x5b5bd6, "有序列表", "1.", "ol ordered number list yxlb liebiao", SlashAction::Kind(Ordered)),
         it("基础", Svg("list"), 0x5b5bd6, "无序列表", "-", "ul bullet list wxlb liebiao", SlashAction::Kind(Bullet)),
-        it("基础", Svg("braces"), 0x2ea121, "代码块", "```", "code dmk daima", SlashAction::Kind(Code { lang: "Plain Text".into(), wrap: true, height: None })),
+        it(
+            "基础",
+            Svg("braces"),
+            0x2ea121,
+            "代码块",
+            "```",
+            "code dmk daima",
+            SlashAction::Kind(Code { lang: "Plain Text".into(), wrap: false, height: None }),
+        ),
         it("基础", Svg("quote"), 0x3b6cf6, "引用", ">", "quote yy yinyong", SlashAction::Kind(Quote)),
         it("基础", Svg("divider"), 0xf5a339, "分隔线", "---", "hr divider line fgx fenge fengexian fenge", SlashAction::Divider),
         it("基础", Svg("link"), 0x3b6cf6, "链接", "⌘K", "link lj lianjie url chaolianjie", SlashAction::Link),
@@ -290,7 +298,7 @@ impl Editor {
             "[]" | "[ ]" | "【】" => BlockKind::Todo { checked: false },
             "[x]" | "[X]" => BlockKind::Todo { checked: true },
             ">" | "》" => BlockKind::Quote,
-            "```" | "···" => BlockKind::Code { lang: "Plain Text".into(), wrap: true, height: None },
+            "```" | "···" => BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None },
             p if p.len() >= 2
                 && (p.ends_with('.') || p.ends_with('、') || p.ends_with(')'))
                 && p.trim_end_matches(['.', '、', ')']).chars().all(|c| c.is_ascii_digit())
@@ -938,7 +946,7 @@ impl Editor {
             BlockKind::Text if blk.text.text.starts_with("```") && h.offset == blk.text.len() => {
                 let lang = normalize_lang(&blk.text.text[3..]);
                 let b = self.block_mut(h.block);
-                b.kind = BlockKind::Code { lang, wrap: true, height: None };
+                b.kind = BlockKind::Code { lang, wrap: false, height: None };
                 b.text = RichText::default();
                 self.core.head = Pos::new(h.block, 0, 0);
             }
@@ -1313,7 +1321,7 @@ impl Editor {
         self.set_kind(BlockKind::Quote, cx)
     }
     pub fn set_code(&mut self, _: &SetCode, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_kind(BlockKind::Code { lang: "Plain Text".into(), wrap: true, height: None }, cx)
+        self.set_kind(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, cx)
     }
 
     pub fn toggle_todo_at(&mut self, b: usize, cx: &mut Context<Self>) {

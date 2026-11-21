@@ -413,7 +413,10 @@ static COMMANDS: &[(&[&str], Cmd)] = &[
         for (i, b) in e.content.blocks.iter().enumerate() {
             if matches!(&b.kind, crate::model::BlockKind::Code { .. }) {
                 if let Some((h, _)) = e.caches.code_vscroll.borrow().get(&b.id) {
-                    println!("CODESCROLL b={i} off={:?} max={:?}", h.offset(), h.max_offset());
+                    println!("CODESCROLL b={i} off={:?} max={:?} view={:?}", h.offset(), h.max_offset(), h.bounds());
+                }
+                if let Some((h, _)) = e.caches.code_scroll.borrow().get(&b.id) {
+                    println!("CODEHSCROLL b={i} off={:?} max={:?} view={:?}", h.offset(), h.max_offset(), h.bounds());
                 }
             }
         }

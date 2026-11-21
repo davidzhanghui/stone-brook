@@ -26,7 +26,7 @@ No account, no cloud. Everything lives in one SQLite file on your machine (only 
 
 | Area | What you get |
 |---|---|
-| Documents | Six heading levels, nested lists and to-dos, quotes, callouts, code blocks (highlighting for 19 languages), tables, columns, image crop and scale; Markdown shortcuts; comments; synced blocks; templates |
+| Documents | Six heading levels, nested lists and to-dos, quotes, callouts, code blocks (highlighting for 21 languages), tables, columns, image crop and scale; Markdown shortcuts; comments; synced blocks; templates |
 | Paste and export | Paste from the web and keep the formatting; copy writes both HTML and Markdown; import Markdown; export Markdown / HTML / PDF |
 | Diagrams and math | A built-in Mermaid-style renderer (flowchart, sequence, class, state, ER, Gantt, pie, mind map, timeline); KaTeX, block and inline |
 | Boards | Shapes, connectors, sticky notes, frames, swimlanes, freehand, mind maps, about 23,000 assets, 60 templates; Mermaid / PlantUML converted into editable shapes |

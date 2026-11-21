@@ -12,6 +12,16 @@ use std::path::PathBuf;
 /// 代码块可拖动高度的上下限（正文区，不含工具栏）
 pub(crate) const CODE_MIN_H: f32 = 84.;
 pub(crate) const CODE_MAX_H: f32 = 2000.;
+/// 代码块默认最多显示的行数（与飞书一致）：超过后正文区纵向滚动，不再无限撑高
+pub(crate) const CODE_DEFAULT_LINES: f32 = 15.;
+/// 代码块正文区的上下内边距
+const CODE_BODY_PT: f32 = 4.;
+const CODE_BODY_PB: f32 = 12.;
+
+/// 默认（未手动拖高）时正文区的最大高度：恰好容纳 [`CODE_DEFAULT_LINES`] 行。
+pub(crate) fn code_default_max_h(line_h: f32) -> f32 {
+    line_h * CODE_DEFAULT_LINES + CODE_BODY_PT + CODE_BODY_PB
+}
 
 pub fn content_w() -> f32 {
     if crate::settings::wide() {
@@ -54,6 +64,8 @@ pub struct SlotSpec {
     pub nowrap: bool,
     /// 关闭换行时的横向滚动句柄：光标移出可视区时自动跟过去
     pub hscroll: Option<ScrollHandle>,
+    /// 代码块的纵向滚动句柄（默认 15 行限高）：光标移出可视区时自动跟过去
+    pub vscroll: Option<ScrollHandle>,
     /// 代码块折叠：要隐藏的模型字节区间（已排序、互不重叠）
     pub folds: Option<Rc<Vec<(usize, usize)>>>,
 }
@@ -71,6 +83,7 @@ impl SlotSpec {
             lang: None,
             nowrap: false,
             hscroll: None,
+            vscroll: None,
             folds: None,
         }
     }
@@ -483,6 +496,7 @@ impl Editor {
         let line_h = spec.line_h;
         // 关闭换行的代码块：光标移动时把它带回横向可视区
         let hscroll = spec.hscroll.clone();
+        let vscroll = spec.vscroll.clone();
         let follow = focused && is_head && !has_sel && !self.sess.read_only;
         let caret_block = self.content.blocks.get(b).map(|x| x.id);
 
@@ -521,25 +535,53 @@ impl Editor {
                                 if show_caret {
                                     quad = Some(r);
                                 }
-                                // 只在光标位置变化时跟随：用户手动横向滚动不会被弹回
+                                // 只在光标位置变化时跟随：用户手动滚动不会被弹回
                                 if follow {
-                                    if let (Some(hs), Some(cid)) = (hscroll.as_ref(), caret_block) {
+                                    if let Some(cid) = caret_block {
                                         if f.code_caret_last != Some((cid, o)) {
-                                            f.code_caret_last = Some((cid, o));
-                                            let vb = hs.bounds();
-                                            if vb.size.width > px(0.) {
-                                                let pad = px(16.);
-                                                let mut off = hs.offset();
-                                                if p.x < vb.left() + pad {
-                                                    off.x += vb.left() + pad - p.x;
-                                                } else if p.x > vb.right() - pad {
-                                                    off.x -= p.x - (vb.right() - pad);
+                                            // 横向：关闭自动换行时长行滚回可视区
+                                            if let Some(hs) = hscroll.as_ref() {
+                                                let vb = hs.bounds();
+                                                if vb.size.width > px(0.) {
+                                                    let pad = px(16.);
+                                                    let mut off = hs.offset();
+                                                    if p.x < vb.left() + pad {
+                                                        off.x += vb.left() + pad - p.x;
+                                                    } else if p.x > vb.right() - pad {
+                                                        off.x -= p.x - (vb.right() - pad);
+                                                    }
+                                                    off.x = off.x.clamp(-hs.max_offset().width, px(0.));
+                                                    if off.x != hs.offset().x {
+                                                        hs.set_offset(off);
+                                                        window.refresh();
+                                                    }
                                                 }
-                                                off.x = off.x.clamp(-hs.max_offset().width, px(0.));
-                                                if off.x != hs.offset().x {
-                                                    hs.set_offset(off);
-                                                    window.refresh();
+                                            }
+                                            // 纵向：默认 15 行限高后，光标走到被裁掉的行时滚回来。
+                                            // 滚动容器的句柄在子节点之后才更新（本帧可能还是上一帧的
+                                            // 尺寸），拿不到可视区就先不记住光标位置，下一帧再试。
+                                            let mut seen = true;
+                                            if let Some(vs) = vscroll.as_ref() {
+                                                let vb = vs.bounds();
+                                                if vb.size.height > px(0.) {
+                                                    let pad = px(8.);
+                                                    let mut off = vs.offset();
+                                                    if p.y < vb.top() + pad {
+                                                        off.y += vb.top() + pad - p.y;
+                                                    } else if p.y + h > vb.bottom() - pad {
+                                                        off.y -= p.y + h - (vb.bottom() - pad);
+                                                    }
+                                                    off.y = off.y.clamp(-vs.max_offset().height, px(0.));
+                                                    if off.y != vs.offset().y {
+                                                        vs.set_offset(off);
+                                                        window.refresh();
+                                                    }
+                                                } else {
+                                                    seen = false;
                                                 }
+                                            }
+                                            if seen {
+                                                f.code_caret_last = Some((cid, o));
                                             }
                                         }
                                     }
@@ -1150,6 +1192,7 @@ impl Editor {
         // 关闭换行时的横向滚动句柄（按块保存）
         let scroll = (!wrap)
             .then(|| self.caches.code_scroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone());
+        let (vh, vd) = self.caches.code_vscroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone();
         let mut spec = SlotSpec {
             size: 13.5,
             line_h: 22.,
@@ -1157,6 +1200,7 @@ impl Editor {
             lang: Some(lang.to_string()),
             nowrap: !wrap,
             hscroll: scroll.as_ref().map(|(h, _)| h.clone()),
+            vscroll: Some(vh.clone()),
             ..SlotSpec::body(t)
         };
         let code = blk.text.text.clone();
@@ -1356,8 +1400,8 @@ impl Editor {
                     Some(c) if c > 1. && h >= c - 0.5 => None,
                     _ => Some(h.clamp(CODE_MIN_H, CODE_MAX_H)),
                 });
-                let (vh, vd) =
-                    self.caches.code_vscroll.borrow_mut().entry(blk.id).or_insert_with(|| (ScrollHandle::new(), crate::ui::ScrollDrag::default())).clone();
+                // 未手动拖高时（body_h 为 None）默认最多显示 15 行，超出部分纵向滚动
+                let default_cap = code_default_max_h(spec.line_h);
                 let recorder = self.caches.code_body_h.clone();
                 let body_id = blk.id;
                 let row = div()
@@ -1386,16 +1430,15 @@ impl Editor {
                             .min_w(px(0.))
                             .pl(px(8.))
                             .pr(px(16.))
-                            .pt(px(4.))
-                            .pb(px(12.))
+                            .pt(px(CODE_BODY_PT))
+                            .pb(px(CODE_BODY_PB))
                             .child(self.render_slot(ix, 0, &blk.text, spec, focused, t))
                             .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx))
                             .into_any_element()
                     } else {
-                        // 关闭换行：按内容固有宽度排版，放进横向滚动容器（尾部一行自定义滚动条）
-                        let (handle, drag) = scroll.clone().unwrap();
+                        // 关闭换行：按内容固有宽度排版，放进横向滚动容器（横向滚动条画在可视区底部）
+                        let (handle, _) = scroll.clone().unwrap();
                         div()
-                            .relative()
                             .flex_1()
                             .min_w(px(0.))
                             .child(
@@ -1408,75 +1451,82 @@ impl Editor {
                                     .track_scroll(&handle)
                                     .pl(px(8.))
                                     .pr(px(16.))
-                                    .pt(px(4.))
-                                    .pb(px(12.))
+                                    .pt(px(CODE_BODY_PT))
+                                    .pb(px(CODE_BODY_PB))
                                     .child(
                                         self.render_slot(ix, 0, &blk.text, spec, focused, t)
                                             .flex_none()
                                             .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
                                     ),
                             )
-                            .child(crate::ui::hscrollbar(handle, drag, t.text_muted))
                             .into_any_element()
                     });
                 div()
                     .relative()
                     .w_full()
                     .child(
-                        div().id(("code-body", blk.id as usize)).w_full().when_some(body_h, |d, h| d.h(px(h)).overflow_y_scroll().track_scroll(&vh)).child(row),
+                        div()
+                            .id(("code-body", blk.id as usize))
+                            .w_full()
+                            // 手动拖高：固定高度；否则自适应但默认最多 15 行（超出纵向滚动）
+                            .when_some(body_h, |d, h| d.h(px(h)))
+                            .when(body_h.is_none(), |d| d.max_h(px(default_cap)))
+                            .overflow_y_scroll()
+                            .track_scroll(&vh)
+                            .child(row),
                     )
                     // 飞书同款滚轮分发：指针在代码块上时，滚轮先滚块内；块滚到顶/底才把滚动交给外层文档。
                     // GPUI 的 List 在冒泡阶段无条件滚动，块内滚动句柄也在冒泡阶段生效，两者会同时滚；
                     // 这里用捕获阶段抢占，块内还能滚时吃掉事件（手动改偏移），到边界再放行。
-                    .when_some(body_h, |d, _| {
+                    .child({
                         let v = vh.clone();
                         let hx = scroll.as_ref().map(|(h, _)| h.clone());
                         let over = hovered;
-                        d.child(
-                            canvas(
-                                |_, _, _| {},
-                                move |bounds, _, window, _| {
-                                    let view = window.current_view();
-                                    window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
-                                        if phase != DispatchPhase::Capture || !over || !bounds.contains(&ev.position) {
-                                            return;
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let view = window.current_view();
+                                window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
+                                    if phase != DispatchPhase::Capture || !over || !bounds.contains(&ev.position) {
+                                        return;
+                                    }
+                                    let delta = ev.delta.pixel_delta(window.line_height());
+                                    if delta.y.is_zero() {
+                                        return;
+                                    }
+                                    let max = v.max_offset().height;
+                                    if max <= px(0.5) {
+                                        return;
+                                    }
+                                    let off = v.offset();
+                                    let cur = -off.y;
+                                    let down = delta.y < px(0.);
+                                    let at_edge = if down { cur >= max - px(0.5) } else { cur <= px(0.5) };
+                                    if at_edge {
+                                        return; // 已到边界：放行，让外层文档接着滚
+                                    }
+                                    v.set_offset(point(off.x, -(cur - delta.y).clamp(px(0.), max)));
+                                    // 触控板斜向手势：横向一并滚内部横向滚动条（关闭自动换行时才有）
+                                    if let Some(h) = hx.as_ref().filter(|_| !delta.x.is_zero()) {
+                                        let max_x = h.max_offset().width;
+                                        if max_x > px(0.5) {
+                                            let o = h.offset();
+                                            h.set_offset(point(-(-o.x - delta.x).clamp(px(0.), max_x), o.y));
                                         }
-                                        let delta = ev.delta.pixel_delta(window.line_height());
-                                        if delta.y.is_zero() {
-                                            return;
-                                        }
-                                        let max = v.max_offset().height;
-                                        if max <= px(0.5) {
-                                            return;
-                                        }
-                                        let off = v.offset();
-                                        let cur = -off.y;
-                                        let down = delta.y < px(0.);
-                                        let at_edge = if down { cur >= max - px(0.5) } else { cur <= px(0.5) };
-                                        if at_edge {
-                                            return; // 已到边界：放行，让外层文档接着滚
-                                        }
-                                        v.set_offset(point(off.x, -(cur - delta.y).clamp(px(0.), max)));
-                                        // 触控板斜向手势：横向一并滚内部横向滚动条（关闭自动换行时才有）
-                                        if let Some(h) = hx.as_ref().filter(|_| !delta.x.is_zero()) {
-                                            let max_x = h.max_offset().width;
-                                            if max_x > px(0.5) {
-                                                let o = h.offset();
-                                                h.set_offset(point(-(-o.x - delta.x).clamp(px(0.), max_x), o.y));
-                                            }
-                                        }
-                                        cx.stop_propagation();
-                                        cx.notify(view);
-                                    });
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify(view);
+                                });
+                            },
                         )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
                     })
-                    .when_some(body_h, |d, _| d.child(crate::ui::scrollbar(vh.clone(), vd.clone(), t.text_muted)))
+                    .child(crate::ui::scrollbar(vh.clone(), vd.clone(), t.text_muted))
+                    // 关闭自动换行时：横向滚动条画在可视区底部，纵向滚动后仍固定可见
+                    .when_some(scroll.clone(), |d, (handle, drag)| d.child(crate::ui::hscrollbar(handle, vh.clone(), drag, t.text_muted)))
                     .child(
                         div()
                             .id(("code-resize", blk.id as usize))
@@ -1502,7 +1552,9 @@ impl Editor {
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
-                                    let start = body_h.or_else(|| this.caches.code_body_h.borrow().get(&body_id).copied()).unwrap_or(120.);
+                                    // 拖动从「当前看到的高度」开始：默认上限 15 行时不能从整段内容高度跳变
+                                    let start =
+                                        body_h.or_else(|| this.caches.code_body_h.borrow().get(&body_id).copied().map(|c| c.min(default_cap))).unwrap_or(120.);
                                     let max_h = this
                                         .caches
                                         .code_body_h

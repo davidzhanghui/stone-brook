@@ -132,7 +132,7 @@ fn all_blocks() -> Vec<Block> {
         with(Block::new(BlockKind::Ordered, p("指定编号")), |b| b.num = Some(7)),
         Block::new(BlockKind::Todo { checked: true }, p("待办")),
         Block::new(BlockKind::Quote, p("引用")),
-        Block::new(BlockKind::Code { lang: "rust".into(), wrap: true, height: None }, p("fn main() {}\n")),
+        Block::new(BlockKind::Code { lang: "rust".into(), wrap: false, height: None }, p("fn main() {}\n")),
         Block::new(BlockKind::Callout { emoji: "💡".into(), color: 4 }, p("高亮块")),
         Block::new(BlockKind::Divider, RichText::default()),
         Block::new(BlockKind::Notes, p("演讲者备注")),

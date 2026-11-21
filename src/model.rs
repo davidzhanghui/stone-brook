@@ -549,8 +549,9 @@ pub enum BlockKind {
     Quote,
     Code {
         lang: String,
-        /// 自动换行：true 时长行折行显示，false 时单行显示并可横向滚动（默认换行，与旧数据一致）
-        #[serde(default = "is_true_default", skip_serializing_if = "is_true")]
+        /// 自动换行：true 时长行折行显示，false 时单行显示并可横向滚动。
+        /// 默认关闭（与飞书一致）；旧文档缺省该字段时也按关闭处理。
+        #[serde(default, skip_serializing_if = "is_false")]
         wrap: bool,
         /// 固定高度（逻辑像素）：拖过上/下边缘调整；None 表示随内容自适应。随文档保存
         #[serde(default, skip_serializing_if = "Option::is_none")]

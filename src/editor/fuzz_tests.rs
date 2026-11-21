@@ -114,7 +114,7 @@ fn seed_doc() -> DocContent {
         Block::new(BlockKind::Todo { checked: false }, RichText::plain("待办 todo")),
         todo2,
         Block::new(BlockKind::Quote, RichText::plain("引用 quote")),
-        Block::new(BlockKind::Code { lang: "rust".into(), wrap: true, height: None }, RichText::plain("fn main() {\n    println!(\"hi\");\n}")),
+        Block::new(BlockKind::Code { lang: "rust".into(), wrap: false, height: None }, RichText::plain("fn main() {\n    println!(\"hi\");\n}")),
         Block::new(BlockKind::Callout { emoji: "💡".into(), color: 2 }, RichText::plain("高亮块")),
         Block::new(BlockKind::Divider, RichText::default()),
         table,
@@ -274,7 +274,7 @@ fn random_kind(rng: &mut Rng) -> BlockKind {
         3 => BlockKind::Ordered,
         4 => BlockKind::Todo { checked: rng.chance(50) },
         5 => BlockKind::Quote,
-        6 => BlockKind::Code { lang: String::new(), wrap: true, height: None },
+        6 => BlockKind::Code { lang: String::new(), wrap: false, height: None },
         7 => BlockKind::Callout { emoji: "📌".into(), color: rng.below(5) as u8 },
         _ => BlockKind::Text,
     }

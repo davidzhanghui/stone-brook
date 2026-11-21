@@ -36,6 +36,7 @@ pub const LANGS: &[&str] = &[
     "HTML",
     "CSS",
     "Markdown",
+    "HTTP",
     "Kotlin",
     "Swift",
     "Mermaid",
@@ -66,6 +67,7 @@ fn lang_matches(lang: &str, query: &str) -> bool {
         "markdown" => "md",
         "yaml" => "yml",
         "html" => "xml",
+        "http" => "rest api",
         "c++" => "cpp",
         "kotlin" => "kt",
         "latex" => "tex",
@@ -399,6 +401,7 @@ pub fn highlight(lang: &str, text: &str) -> Vec<(Range<usize>, Tok)> {
         "css" => return highlight_css(text),
         "yaml" | "yml" => return highlight_yaml(text),
         "latex" | "tex" => return highlight_latex(text),
+        "http" | "https" => return highlight_http(text),
         _ => {}
     }
     let Some(syn) = syntax_for(lang) else {
@@ -891,6 +894,87 @@ fn highlight_latex(text: &str) -> Vec<(Range<usize>, Tok)> {
     out
 }
 
+/// HTTP 报文：请求行 / 状态行、Header 名与值。空行之后是报文体，不着色（可能是任意格式）。
+fn highlight_http(text: &str) -> Vec<(Range<usize>, Tok)> {
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"];
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut in_body = false;
+    while i < text.len() {
+        let line_end = text[i..].find('\n').map_or(text.len(), |e| i + e);
+        let next = if line_end < text.len() { line_end + 1 } else { line_end };
+        let line = text[i..line_end].trim_end();
+        let len = line.len();
+        if len == 0 {
+            // 首个空行起就是报文体
+            in_body = true;
+            i = next;
+            continue;
+        }
+        if in_body {
+            i = next;
+            continue;
+        }
+        // 状态行：HTTP/1.1 200 OK
+        if line.starts_with("HTTP/") {
+            let ver_end = line.find(' ').unwrap_or(len);
+            out.push((i..i + ver_end, Tok::Keyword));
+            let rest = &line[ver_end..];
+            let lead = rest.len() - rest.trim_start().len();
+            let code_start = i + ver_end + lead;
+            let code = &line[ver_end + lead..];
+            let n = code.bytes().take_while(u8::is_ascii_digit).count();
+            if n > 0 {
+                out.push((code_start..code_start + n, Tok::Number));
+                let reason = &line[ver_end + lead + n..];
+                let lead2 = reason.len() - reason.trim_start().len();
+                if lead2 < reason.len() {
+                    let rs = code_start + n + lead2;
+                    out.push((rs..i + len, Tok::String));
+                }
+            }
+            i = next;
+            continue;
+        }
+        // 请求行：METHOD SP target [SP HTTP/x.y]
+        let mlen = line.bytes().take_while(u8::is_ascii_alphabetic).count();
+        if mlen > 0 && line.as_bytes().get(mlen) == Some(&b' ') && METHODS.contains(&line[..mlen].to_ascii_uppercase().as_str()) {
+            out.push((i..i + mlen, Tok::Keyword));
+            let rest = &line[mlen + 1..];
+            let lead = rest.len() - rest.trim_start().len();
+            let target_start = i + mlen + 1 + lead;
+            let target = &line[mlen + 1 + lead..];
+            let tlen = target.find(' ').unwrap_or(target.len());
+            if tlen > 0 {
+                out.push((target_start..target_start + tlen, Tok::String));
+                let tail = target[tlen..].trim_start();
+                if tail.starts_with("HTTP/") {
+                    let vs = target_start + tlen + (target[tlen..].len() - tail.len());
+                    out.push((vs..i + len, Tok::Keyword));
+                }
+            }
+            i = next;
+            continue;
+        }
+        // Header：Name: value
+        if let Some(colon) = line.find(':') {
+            let name = &line[..colon];
+            let valid = !name.is_empty() && !name.starts_with(' ') && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'));
+            if valid {
+                out.push((i..i + colon, Tok::Function));
+                let val = &line[colon + 1..];
+                let lead = val.len() - val.trim_start().len();
+                if lead < val.len() {
+                    let vs = i + colon + 1 + lead;
+                    out.push((vs..i + len, Tok::String));
+                }
+            }
+        }
+        i = next;
+    }
+    out
+}
+
 type Tokens = Rc<Vec<(Range<usize>, Tok)>>;
 
 thread_local! {
@@ -1070,6 +1154,7 @@ mod tests {
             ("HTML", "<!-- 注释 --><div class=\"box\">hi</div>"),
             ("CSS", "/* 注释 */ .box { color: #ff0000; width: 10px; }"),
             ("Markdown", "# Title **bold** [link](https://example.com) `code`"),
+            ("HTTP", "POST /api/users HTTP/1.1\nHost: example.com\nContent-Type: application/json\n\n{\"ok\": true}"),
             ("Kotlin", "fun main() { val x = 1 } // 注释"),
             ("Swift", "func f() { let x = 1 } // 注释"),
             ("Mermaid", "flowchart LR\n  A[开始] --> B{判断}"),
@@ -1093,6 +1178,26 @@ mod tests {
         for lang in LANGS {
             assert!(cases.iter().any(|(l, _)| l == lang), "缺少 {lang} 的测试样例");
         }
+    }
+
+    #[test]
+    fn http_tokens() {
+        let req = "POST /crm/v1/order/search HTTP/1.1\nHost: crm.example.com\nContent-Type: application/json\n\n{\"key\": 1}";
+        let toks = highlight("http", req);
+        assert_eq!(tok_of(req, &toks, Tok::Keyword), ["POST", "HTTP/1.1"]);
+        assert!(tok_of(req, &toks, Tok::String).contains(&"/crm/v1/order/search"));
+        assert!(tok_of(req, &toks, Tok::Function).contains(&"Host"));
+        assert!(tok_of(req, &toks, Tok::Function).contains(&"Content-Type"));
+        assert!(tok_of(req, &toks, Tok::String).contains(&"application/json"));
+        // 报文体不着色
+        assert!(!tok_of(req, &toks, Tok::Number).contains(&"1"));
+
+        let res = "HTTP/1.1 200 OK\nDate: Fri, 24 Apr 2026 16:10:41 GMT";
+        let toks = highlight("HTTP", res);
+        assert_eq!(tok_of(res, &toks, Tok::Keyword), ["HTTP/1.1"]);
+        assert_eq!(tok_of(res, &toks, Tok::Number), ["200"]);
+        assert!(tok_of(res, &toks, Tok::String).contains(&"OK"));
+        assert!(tok_of(res, &toks, Tok::Function).contains(&"Date"));
     }
 
     #[test]

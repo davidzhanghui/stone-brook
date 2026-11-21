@@ -530,11 +530,13 @@ pub fn scrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl In
 }
 
 /// 叠加在滚动容器底部的水平滚动条（代码块关闭自动换行时使用）；拖动拇指或点轨道滚动。
-pub fn hscrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl IntoElement {
+/// `viewport` 是纵向滚动容器：代码块同时横向 + 纵向滚动时，滚动条要贴着「可视区底部」而不是内容底部。
+pub fn hscrollbar(handle: ScrollHandle, viewport: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |_, _, window, _| {
             let view = handle.bounds();
+            let bottom = viewport.bounds().bottom();
             let max = handle.max_offset().width;
             if max <= px(0.5) || view.size.width <= px(20.) {
                 return;
@@ -545,8 +547,8 @@ pub fn hscrollbar(handle: ScrollHandle, drag: ScrollDrag, color: Hsla) -> impl I
             let scrolled = -handle.offset().x;
             let thumb_left = view.left() + inset + (track_w - thumb_w) * (scrolled / max);
             // 往上让 4px，给代码块底部的拖拽手柄留出空间
-            let track = Bounds::new(point(view.left(), view.bottom() - px(14.)), size(view.size.width, px(10.)));
-            let thumb = Bounds::new(point(thumb_left, view.bottom() - px(12.)), size(thumb_w, px(5.)));
+            let track = Bounds::new(point(view.left(), bottom - px(14.)), size(view.size.width, px(10.)));
+            let thumb = Bounds::new(point(thumb_left, bottom - px(12.)), size(thumb_w, px(5.)));
             let active = drag.get().is_some();
             window.paint_quad(fill(thumb, color.opacity(if active { 0.75 } else { 0.5 })).corner_radii(px(2.5)));
             let per_px = max / (track_w - thumb_w).max(px(1.));

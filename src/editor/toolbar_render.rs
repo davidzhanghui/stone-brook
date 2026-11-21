@@ -382,9 +382,9 @@ impl Editor {
                         .child(item(10, ic_lead("square-check", same(&BlockKind::Todo { checked: false }), false), "任务", BlockKind::Todo { checked: false }))
                         .child(item(
                             11,
-                            ic_lead("braces", same(&BlockKind::Code { lang: String::new(), wrap: true, height: None }), false),
+                            ic_lead("braces", same(&BlockKind::Code { lang: String::new(), wrap: false, height: None }), false),
                             "代码块",
-                            BlockKind::Code { lang: String::new(), wrap: true, height: None },
+                            BlockKind::Code { lang: String::new(), wrap: false, height: None },
                         ))
                         .child(menu_sep())
                         .child(item(12, ic_lead("quote", same(&BlockKind::Quote), false), "引用", BlockKind::Quote))

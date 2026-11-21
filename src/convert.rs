@@ -262,6 +262,32 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// 代码块的 HTML：复用编辑器的高亮结果，按浅色主题给 token 上色（导出 HTML / PDF 共用）。
+fn code_html(lang: &str, text: &str) -> String {
+    let toks = crate::highlight::highlight(lang, text);
+    if toks.is_empty() {
+        return html_escape(text);
+    }
+    let mut out = String::with_capacity(text.len() + toks.len() * 32);
+    let mut pos = 0;
+    for (r, tok) in toks {
+        if r.start < pos || r.end > text.len() || r.start >= r.end {
+            continue;
+        }
+        if r.start > pos {
+            out.push_str(&html_escape(&text[pos..r.start]));
+        }
+        out.push_str("<span style=\"color:");
+        out.push_str(crate::highlight::tok_css(tok, false));
+        out.push_str("\">");
+        out.push_str(&html_escape(&text[r.start..r.end]));
+        out.push_str("</span>");
+        pos = r.end;
+    }
+    out.push_str(&html_escape(&text[pos..]));
+    out
+}
+
 const FG_HEX: [&str; 8] = ["", "#D83931", "#DE7802", "#DC9B04", "#2EA121", "#245BDB", "#6425D0", "#8F959E"];
 /// 0..7 浅色背景，8..15 深色背景（颜色面板两行）
 const BG_HEX: [&str; 16] = [
@@ -373,7 +399,7 @@ pub fn blocks_to_html(blocks: &[impl std::ops::Deref<Target = Block>]) -> String
                 out.push_str(&format!("<blockquote style=\"background:#F0F4FF;border-left:4px solid #3B6CF6;padding:8px 12px\">{emoji} {t}</blockquote>"))
             }
             BlockKind::Code { lang, .. } => {
-                out.push_str(&format!("<pre><code class=\"language-{}\">{}</code></pre>", lang.to_lowercase(), html_escape(&b.text.text)))
+                out.push_str(&format!("<pre><code class=\"language-{}\">{}</code></pre>", lang.to_lowercase(), code_html(lang, &b.text.text)))
             }
             BlockKind::Divider => out.push_str("<hr>"),
             BlockKind::Image { path, alt, width, crop } => {
@@ -555,7 +581,7 @@ pub fn full_html_page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{}</title>\
 <style>body{{max-width:820px;margin:48px auto;padding:0 24px;font:16px/1.75 -apple-system,'PingFang SC',sans-serif;color:#1f2329}}\
-pre{{background:#f5f6f7;padding:12px 16px;border-radius:8px;overflow:auto}}code{{font-family:Menlo,monospace}}\
+pre{{background:#f5f6f7;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}}code{{font-family:Menlo,monospace}}\
 blockquote{{margin:8px 0;padding:2px 14px;border-left:3px solid #bbbfc4;color:#646a73}}\
 table{{border-collapse:collapse}}td,th{{border:1px solid #dee0e3;padding:6px 10px}}th{{background:#f5f6f7}}img{{max-width:100%}}</style>\
 </head><body>{}</body></html>",
@@ -627,7 +653,7 @@ pub fn md_to_blocks(md: &str) -> Vec<Block> {
                         CodeBlockKind::Fenced(l) => normalize_lang(&l),
                         CodeBlockKind::Indented => "Plain Text".into(),
                     };
-                    b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
+                    b.open(BlockKind::Code { lang, wrap: false, height: None }, 0);
                     in_code = true;
                 }
                 Tag::List(start) => {
@@ -814,6 +840,7 @@ pub fn normalize_lang(l: &str) -> String {
         "html" | "xml" => "HTML",
         "css" => "CSS",
         "md" | "markdown" => "Markdown",
+        "http" | "https" => "HTTP",
         "mermaid" => "mermaid",
         "kotlin" | "kt" => "Kotlin",
         "swift" => "Swift",
@@ -1103,7 +1130,7 @@ impl<'a> HtmlWalker<'a> {
     fn flush_code(&mut self, el: scraper::ElementRef, marks: &Marks) {
         let lang = code_lang_from(el);
         self.b.flush();
-        self.b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
+        self.b.open(BlockKind::Code { lang, wrap: false, height: None }, 0);
         self.pre = true;
         self.walk(el, marks);
         self.pre = false;
@@ -1241,7 +1268,7 @@ impl<'a> HtmlWalker<'a> {
                 } else {
                     let lang = code_lang_from(el);
                     let text: String = el.text().collect();
-                    self.b.open(BlockKind::Code { lang, wrap: true, height: None }, 0);
+                    self.b.open(BlockKind::Code { lang, wrap: false, height: None }, 0);
                     self.b.push_raw(text.trim_end_matches('\n'));
                     self.b.flush();
                 }
@@ -1528,7 +1555,18 @@ mod tests {
         let p = &blocks[1].text;
         assert!(p.spans.iter().any(|s| s.marks.bold));
         assert!(p.spans.iter().any(|s| s.marks.color == 1));
-        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into(), wrap: true, height: None });
+        assert_eq!(blocks[5].kind, BlockKind::Code { lang: "Python".into(), wrap: false, height: None });
+    }
+
+    /// 导入 Markdown 的代码块同样适用新默认值：不自动换行，`http` 围栏归一为 HTTP 高亮语言。
+    #[test]
+    fn markdown_http_fence_uses_new_defaults() {
+        let blocks = md_to_blocks("```http\nPOST /x HTTP/1.1\nHost: a.com\n```\n");
+        let code = blocks.iter().find_map(|b| match &b.kind {
+            BlockKind::Code { lang, wrap, height } => Some((lang.clone(), *wrap, *height)),
+            _ => None,
+        });
+        assert_eq!(code, Some(("HTTP".to_string(), false, None)));
     }
 
     #[test]
@@ -1562,6 +1600,29 @@ mod tests {
         assert!(html.contains("width:320px"), "{html}");
         // 内层宽度 = 320 / 0.5
         assert!(html.contains("width:640px"), "{html}");
+    }
+
+    /// HTML / PDF 导出的代码块：带高亮颜色、内容已转义，且样式对超长行自动换行（PDF 不裁切）。
+    #[test]
+    fn html_export_highlights_code_and_wraps() {
+        let code = Block::new(
+            BlockKind::Code { lang: "http".into(), wrap: false, height: None },
+            RichText::plain("POST /x HTTP/1.1\nHost: <demo>.com\nContent-Type: application/json"),
+        );
+        let html = blocks_to_html(&[&code]);
+        assert!(html.contains("class=\"language-http\""), "{html}");
+        // 关键字 / Header 名 / 值都有颜色（浅色主题的 keyword 色）
+        assert!(html.contains("<span style=\"color:#a626a4\">POST</span>"), "{html}");
+        assert!(html.contains("<span style=\"color:#4078f2\">Host</span>"), "{html}");
+        assert!(html.contains("<span style=\"color:#50a14f\">application/json</span>"), "{html}");
+        // 原始 HTML 字符必须转义
+        assert!(html.contains("&lt;demo&gt;"), "{html}");
+        assert!(!html.contains("<demo>"), "{html}");
+
+        let page = full_html_page("t", &html);
+        assert!(page.contains("white-space:pre-wrap"), "{page}");
+        assert!(page.contains("word-break:break-word"), "{page}");
+        assert!(page.contains("overflow-wrap:anywhere"), "{page}");
     }
 
     #[test]
