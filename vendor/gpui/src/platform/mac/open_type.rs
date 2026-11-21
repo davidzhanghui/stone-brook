@@ -32,6 +32,17 @@ pub fn apply_features_and_fallbacks(
     features: &FontFeatures,
     fallbacks: Option<&FontFallbacks>,
 ) -> anyhow::Result<()> {
+    // Stonebrook：默认关闭标准连字（liga）。PingFang SC 的 fi/ffi 连字会吞掉 i 的点，
+    // 正文里的 “fire” 会显示成 “fıre”（i 只剩一根竖线），在中文界面里看着像字母丢了。
+    // 目前界面/代码字体（PingFang SC、Menlo）都没有需要连字的字形，统一关掉。
+    let features = if features.tag_value_list().iter().any(|(tag, _)| tag == "liga") {
+        features.clone()
+    } else {
+        let mut list = features.tag_value_list().to_vec();
+        list.push(("liga".to_string(), 0));
+        FontFeatures(std::sync::Arc::new(list))
+    };
+    let features = &features;
     unsafe {
         let mut keys = vec![kCTFontFeatureSettingsAttribute];
         let mut values = vec![generate_feature_array(features)];

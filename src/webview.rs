@@ -630,7 +630,7 @@ pub fn sandbox_html(body: &str, scripts: bool, dark: bool) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: file:; style-src 'unsafe-inline'; font-src data:; script-src {script_src};\">\
-<style>html,body{{margin:0;padding:0;background:{bg};color:{fg};font:15px/1.6 -apple-system,'PingFang SC',sans-serif;}}body{{padding:2px}}</style>\
+<style>html,body{{margin:0;padding:0;background:{bg};color:{fg};font:15px/1.6 -apple-system,'PingFang SC',sans-serif;font-variant-ligatures:none;}}body{{padding:2px}}</style>\
 </head><body>{body}</body></html>"
     )
 }

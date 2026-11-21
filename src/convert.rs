@@ -580,7 +580,7 @@ fn list_to_html(items: &[impl std::ops::Deref<Target = Block>]) -> String {
 pub fn full_html_page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{}</title>\
-<style>body{{max-width:820px;margin:48px auto;padding:0 24px;font:16px/1.75 -apple-system,'PingFang SC',sans-serif;color:#1f2329}}\
+<style>body{{max-width:820px;margin:48px auto;padding:0 24px;font:16px/1.75 -apple-system,'PingFang SC',sans-serif;font-variant-ligatures:none;color:#1f2329}}\
 pre{{background:#f5f6f7;padding:12px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}}code{{font-family:Menlo,monospace}}\
 blockquote{{margin:8px 0;padding:2px 14px;border-left:3px solid #bbbfc4;color:#646a73}}\
 table{{border-collapse:collapse}}td,th{{border:1px solid #dee0e3;padding:6px 10px}}th{{background:#f5f6f7}}img{{max-width:100%}}</style>\
@@ -1621,6 +1621,8 @@ mod tests {
 
         let page = full_html_page("t", &html);
         assert!(page.contains("white-space:pre-wrap"), "{page}");
+        // 导出的 HTML/PDF 也关掉标准连字（PingFang SC 的 fi 连字会吃掉 i 的点）
+        assert!(page.contains("font-variant-ligatures:none"), "{page}");
         assert!(page.contains("word-break:break-word"), "{page}");
         assert!(page.contains("overflow-wrap:anywhere"), "{page}");
     }
