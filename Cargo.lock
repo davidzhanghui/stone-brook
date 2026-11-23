@@ -6121,7 +6121,7 @@ dependencies = [
 
 [[package]]
 name = "stonebrook"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6136,6 +6136,7 @@ dependencies = [
  "gpui",
  "image",
  "ironcalc",
+ "libc",
  "lyon_tessellation",
  "objc2",
  "objc2-app-kit",
@@ -6150,6 +6151,7 @@ dependencies = [
  "raw-window-handle",
  "regex",
  "resvg",
+ "ring",
  "roughr",
  "roxmltree 0.21.2",
  "rstar",

@@ -1,6 +1,6 @@
 [package]
 name = "stonebrook"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 license = "MIT"
 description = "石渠 Stonebrook — 本地块级文档编辑器"
@@ -38,7 +38,9 @@ objc2-core-foundation = { version = "0.3", features = ["CFString", "CFLocale", "
 core-video = "=0.4.3"
 url = "2"
 sha2 = "0.10"
+ring = "0.17"
 ureq = "3"
+libc = "0.2"
 roughr = "0.14"
 # 草图：自由画 / 线条圆头圆角（与 GPUI 内部的 lyon 同一版本）
 lyon_tessellation = "1.0"
