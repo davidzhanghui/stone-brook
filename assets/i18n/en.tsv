@@ -494,13 +494,63 @@ LaTeX · 支持 KaTeX 全部语法	LaTeX · full KaTeX syntax
 检查更新	Check for updates
 重新检查	Check again
 下载更新	Download update
+跳过此版本	Skip this version
 重启并安装	Restart and install
 重试	Retry
 应用更新	App updates
 自动更新	Automatic updates
-每天检查一次，有新版本自动下载，退出时自动安装（需允许联网）	Checks once a day, downloads new versions automatically, and installs them when you quit (requires network access)
+每 6 小时检查一次，有新版本自动下载，退出时自动安装（需允许联网）	Checks every 6 hours, downloads new versions automatically, and installs them when you quit (requires network access)
 更新	Updates
 自动换行	Wrap lines
 取消自动换行	Unwrap lines
 搜索语言	Search languages
 没有匹配的语言	No matching language
+新版本的石渠可以安装了	A new version of Stonebrook is ready to install
+查看本次更新内容	View what's new
+查看发布说明	Release notes
+以后自动下载并安装更新	Automatically download and install updates in the future
+跳过这个版本	Skip this version
+退出应用时安装	Install on quit
+已安排退出时安装	Scheduled for quit
+安装并重启应用	Install and relaunch
+更新说明	Release notes
+更新策略	Update preferences
+自动检查与下载	Check & download automatically
+每 6 小时后台检查一次，有新版本静默下载（需允许联网）	Checks every 6 hours and downloads updates in the background (requires network)
+开启后下载完成不弹窗打扰，退出应用时静默安装；关闭则弹窗询问	Installs silently on quit without prompting when enabled; prompts when disabled
+外观与排版	Appearance
+通用与隐私	General & Privacy
+数据与存储	Data & Storage
+关于与更新	About & Updates
+主题模式、CSS 配色、界面语言与阅读版式	Theme mode, CSS palettes, UI language, and reading layout
+评论署名与网络权限控制	Comment author name and network access controls
+记录最近 20 周的本地写作活跃度	Local writing activity over the last 20 weeks
+所有文档与资源均保存在本机	All documents and assets stay on this computer
+版本信息、发布说明与自动更新策略	Version info, release notes, and automatic update settings
+主题模式	Theme mode
+界面与排版	Language & Typography
+隐私与网络	Privacy & Network
+当前已允许联网：文档内容仍只存在本地，不会上传到任何服务器	Network enabled: documents still remain strictly local and are never uploaded
+当前处于完全离线模式：不会发起任何网络请求	Fully offline mode: no network requests will be made
+近 20 周字数	Words (20 weeks)
+累计输入字符	Total characters typed
+活跃天数	Active days
+有过输入记录	Days with writing
+连续写作	Writing streak
+当前连续天数	Current streak
+写作热力图	Activity heatmap
+少	Less
+多	More
+文档数量	Documents
+不含回收站	Excluding trash
+画板 / 表格 / 多维表	Boards / Sheets / Bases
+本地资源	Local assets
+图片与附件体积	Images & attachments
+数据目录	Data folder
+备份与恢复	Backup & Restore
+完整备份	Full backup
+打包导出所有文档、嵌入对象与本地图片附件	Export all documents, embedded objects, and local attachments
+导出备份	Export backup
+从备份恢复	Restore backup
+有新版	Update
+设置 ⌘,（有新版本可安装）	Settings ⌘, (Update ready)

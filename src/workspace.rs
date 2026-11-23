@@ -102,6 +102,16 @@ pub enum ToastKind {
     Success,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SettingsTab {
+    #[default]
+    Appearance,
+    General,
+    Stats,
+    Data,
+    Updates,
+}
+
 pub struct Workspace {
     pub store: Store,
     docs: Vec<DocMeta>,
@@ -147,12 +157,17 @@ pub struct Workspace {
     base_picker: Option<Vec<(String, String, usize)>>,
     template_list: Vec<(String, String, String)>,
     settings_open: bool,
+    settings_tab: SettingsTab,
     /// 待确认的破坏性操作（永久删除）；Some 时显示确认弹窗并拦截点击
     confirm: Option<Confirm>,
     /// 确认弹窗的焦点（弹窗打开时聚焦它，Esc 才能关掉，而不是落到编辑器的 Esc 处理上）
     confirm_focus: FocusHandle,
     /// 已经提示过「新版本已下载」的版本号
     update_notified: Option<String>,
+    /// 新版本就绪决策弹窗（Muse / Sparkle 2 风格）
+    update_dialog_open: bool,
+    /// 更新弹窗里是否展开更新说明
+    update_notes_open: bool,
     /// 右侧评论侧栏是否展开
     comments_open: bool,
     /// 设置面板里的「评论作者名」输入框
@@ -652,9 +667,12 @@ impl Workspace {
             base_picker: None,
             template_list: vec![],
             settings_open: false,
+            settings_tab: SettingsTab::Appearance,
             confirm: None,
             confirm_focus: cx.focus_handle(),
             update_notified: None,
+            update_dialog_open: false,
+            update_notes_open: false,
             comments_open: false,
             author_input,
             palette: None,
@@ -711,11 +729,17 @@ impl Workspace {
                     this.show_toast_for(e, 6000, cx);
                 }
                 if crate::updater::take_changed() {
-                    // 后台自动下载好新版本：提示一次
+                    // 后台自动下载好新版本：未开「以后自动下载并安装更新」且当前未打开设置面板时，弹出决策框；
+                    // 开启了自动安装则不弹窗打扰，仅做轻提示并在侧栏显示蓝点徽标。
                     if let crate::updater::State::Ready { release, .. } = crate::updater::state() {
                         if this.update_notified.as_deref() != Some(release.version.as_str()) {
                             this.update_notified = Some(release.version.clone());
-                            this.show_toast_for(format!("新版本 {} 已下载好：设置 → 更新 里点「重启并安装」，或下次退出时自动安装", release.version), 8000, cx);
+                            if crate::updater::auto_install_enabled(&this.store) {
+                                this.show_toast_for(format!("新版本 {} 已下载好，退出应用时将自动安装", release.version), 6000, cx);
+                            } else if !this.settings_open {
+                                this.update_dialog_open = true;
+                                this.update_notes_open = false;
+                            }
                         }
                     }
                     cx.notify();
@@ -1632,6 +1656,24 @@ impl Workspace {
                                 cx.notify();
                             })),
                     )
+                    .child({
+                        let has_update = matches!(crate::updater::state(), crate::updater::State::Ready { .. });
+                        let tip = if has_update { "设置 ⌘,（有新版本可安装）" } else { "设置 ⌘," };
+                        div()
+                            .relative()
+                            .child(icon_button("settings", "settings", tip, cx).on_click(cx.listener(move |this, _, _, cx| {
+                                if has_update {
+                                    this.show_settings_tab(SettingsTab::Updates, cx);
+                                } else {
+                                    this.show_settings(cx);
+                                }
+                            })))
+                            .when(has_update, |d| {
+                                d.child(
+                                    div().absolute().top(px(3.)).right(px(3.)).size(px(7.)).rounded_full().bg(t.accent).border_1().border_color(t.sidebar_bg),
+                                )
+                            })
+                    })
                     .child(
                         icon_button("theme", theme_icon, "切换深浅色 ⇧⌘D（右键跟随系统）", cx)
                             .on_click(cx.listener(|this, _, w, cx| this.cycle_theme(&CycleTheme, w, cx)))
@@ -2565,20 +2607,27 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::cycle_theme))
             .on_action(cx.listener(Self::open_settings))
-            .on_action(cx.listener(|this, _: &About, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &About, _, cx| this.show_settings_tab(SettingsTab::Updates, cx)))
             .on_action(cx.listener(|this, _: &CheckUpdate, _, cx| {
-                this.show_settings(cx);
-                crate::updater::run(true, true);
+                if matches!(crate::updater::state(), crate::updater::State::Ready { .. }) {
+                    this.update_dialog_open = true;
+                    this.update_notes_open = false;
+                    cx.notify();
+                } else {
+                    this.show_settings_tab(SettingsTab::Updates, cx);
+                    crate::updater::run(true, true);
+                }
             }))
             .on_action(cx.listener(|this, _: &InstallUpdate, _, cx| this.install_update(cx)))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape"
-                    && (this.confirm.is_some() || this.settings_open || this.template_picker.is_some() || this.base_picker.is_some())
+                    && (this.confirm.is_some() || this.settings_open || this.update_dialog_open || this.template_picker.is_some() || this.base_picker.is_some())
                 {
                     if this.confirm.take().is_some() {
                         window.focus(&this.editor.focus_handle(cx));
                     }
                     this.settings_open = false;
+                    this.update_dialog_open = false;
                     this.template_picker = None;
                     this.base_picker = None;
                     cx.stop_propagation();
@@ -2630,6 +2679,7 @@ impl Render for Workspace {
             .when(self.template_picker.is_some(), |d| d.child(self.render_templates(&t, cx)))
             .children(self.render_base_picker(&t, cx))
             .when(self.settings_open, |d| d.child(self.render_settings(&t, cx)))
+            .when(self.update_dialog_open, |d| d.child(self.render_update_dialog(&t, cx)))
             .children(self.render_palette(&t, cx))
             .children(self.render_shortcuts_panel(&t, cx))
             .children(self.render_confirm(&t, cx))

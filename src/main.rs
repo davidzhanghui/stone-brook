@@ -312,8 +312,26 @@ fn quit_app(cx: &mut App) {
     cx.quit();
 }
 
+/// 从 .app 启动时只允许一个实例；重复启动就把已运行的窗口带到前台。
+fn single_instance() -> Option<std::fs::File> {
+    if updater::current_bundle().is_none() || std::env::var_os("STONEBROOK_SCRIPT").is_some() {
+        return None;
+    }
+    let dir = store::data_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(".instance.lock")).ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(_) => {
+            let _ = std::process::Command::new("open").arg("-b").arg("app.stonebrook").status();
+            std::process::exit(0);
+        }
+    }
+}
+
 fn main() {
     install_panic_log();
+    let _instance = single_instance();
     // 上次选择了「从备份恢复」：在打开数据库之前换入
     let restore = backup::apply_pending();
     let store = match store::Store::open() {
@@ -337,7 +355,7 @@ fn main() {
     i18n::set_english(store.get_kv("lang").as_deref() == Some("en"));
     board::iconlib::warm();
     store::install(store.clone());
-    updater::auto_check(&store);
+    updater::init(&store);
     // 后台回收：7 天前起不再被任何文档引用的嵌入对象
     {
         let s = store.clone();
@@ -368,6 +386,12 @@ fn main() {
         shortcuts::init(cx);
         cx.set_menus(menus());
         cx.on_action(|_: &Quit, cx: &mut App| quit_app(cx));
+        // 兜底处理 macOS Dock 右键「退出」或系统关机：落盘并在用户已授权时顺手安装更新
+        cx.on_app_quit(|_| async {
+            flush_all();
+            updater::install_on_quit();
+        })
+        .detach();
         // 电子表格停手后落盘（只在有脏表时做事）
         cx.spawn(async move |cx: &mut AsyncApp| loop {
             cx.background_executor().timer(objects::SHEET_DEBOUNCE / 2).await;

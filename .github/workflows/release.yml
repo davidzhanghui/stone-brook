@@ -76,8 +76,23 @@ jobs:
           path: out
           merge-multiple: true
 
-      - name: SHA-256 checksums
-        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: SHA-256 checksums & Ed25519 signature
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          cd out
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::Missing RELEASE_SIGNING_KEY secret"
+            exit 1
+          fi
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/release-signing.pem
+          chmod 600 /tmp/release-signing.pem
+          openssl pkeyutl -sign -inkey /tmp/release-signing.pem -rawin -in SHA256SUMS.txt -out SHA256SUMS.txt.sig
+          openssl pkey -in /tmp/release-signing.pem -pubout -out /tmp/release-signing.pub.pem
+          openssl pkeyutl -verify -pubin -inkey /tmp/release-signing.pub.pem -rawin -in SHA256SUMS.txt -sigfile SHA256SUMS.txt.sig
+          rm -f /tmp/release-signing.pem /tmp/release-signing.pub.pem
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
