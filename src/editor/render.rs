@@ -1432,8 +1432,8 @@ impl Editor {
                             .pr(px(16.))
                             .pt(px(CODE_BODY_PT))
                             .pb(px(CODE_BODY_PB))
+                            .cursor(CursorStyle::IBeam)
                             .child(self.render_slot(ix, 0, &blk.text, spec, focused, t))
-                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx))
                             .into_any_element()
                     } else {
                         // 关闭换行：按内容固有宽度排版，放进横向滚动容器（横向滚动条画在可视区底部）
@@ -1441,6 +1441,7 @@ impl Editor {
                         div()
                             .flex_1()
                             .min_w(px(0.))
+                            .cursor(CursorStyle::IBeam)
                             .child(
                                 div()
                                     .id(("code-scroll", blk.id as usize))
@@ -1453,14 +1454,11 @@ impl Editor {
                                     .pr(px(16.))
                                     .pt(px(CODE_BODY_PT))
                                     .pb(px(CODE_BODY_PB))
-                                    .child(
-                                        self.render_slot(ix, 0, &blk.text, spec, focused, t)
-                                            .flex_none()
-                                            .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx)),
-                                    ),
+                                    .child(self.render_slot(ix, 0, &blk.text, spec, focused, t).flex_none()),
                             )
                             .into_any_element()
-                    });
+                    })
+                    .on_mouse_down(MouseButton::Left, self.slot_click(ix, 0, cx));
                 div()
                     .relative()
                     .w_full()

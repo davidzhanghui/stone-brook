@@ -4,6 +4,29 @@ use super::*;
 use crate::model::BlockKind;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// 窗口坐标 → 最近的字形边界（点击字符右半边落到字符之后，符合原生编辑器习惯）。
+fn closest_index_for_position(layout: &gpui::TextLayout, pt: Point<Pixels>) -> usize {
+    match layout.index_for_position(pt) {
+        Err(i) => i,
+        Ok(i) => {
+            let text = layout.text();
+            let Some(g) = text.get(i..).and_then(|s| s.graphemes(true).next()) else {
+                return i;
+            };
+            if g == "\n" || g == "\r\n" {
+                return i;
+            }
+            let next = i + g.len();
+            if let (Some(p0), Some(p1)) = (layout.position_for_index(i), layout.position_for_index(next)) {
+                if (p1.y - p0.y).abs() < px(0.5) && p1.x > p0.x && pt.x >= (p0.x + p1.x) / 2. {
+                    return next;
+                }
+            }
+            i
+        }
+    }
+}
+
 impl Editor {
     pub fn slot_end(&self, block: usize) -> Pos {
         let cell = self.stops(block) - 1;
@@ -184,9 +207,7 @@ impl Editor {
         let target_y = if down { y + lh * 1.5 } else { y - lh * 0.5 };
         let goal = Some(x);
         if target_y > bounds.top() && target_y < bounds.bottom() {
-            let ix = match layout.index_for_position(point(x, target_y)) {
-                Ok(i) | Err(i) => i,
-            };
+            let ix = closest_index_for_position(&layout, point(x, target_y));
             let ix = hmap.as_ref().map_or(ix, |m| m.d2m(ix));
             drop(frame);
             self.core.goal_x = goal;
@@ -204,9 +225,7 @@ impl Editor {
             Some(t) => {
                 let tb = t.bounds();
                 let ty = if down { tb.top() + t.line_height() / 2. } else { tb.bottom() - t.line_height() / 2. };
-                let ix = match t.index_for_position(point(x, ty)) {
-                    Ok(i) | Err(i) => i,
-                };
+                let ix = closest_index_for_position(&t, point(x, ty));
                 let ix = tmap.as_ref().map_or(ix, |m| m.d2m(ix));
                 self.clamp(Pos::new(slot.0, slot.1, ix))
             }
@@ -388,9 +407,7 @@ impl Editor {
             let d = dist(&bounds);
             if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
                 let clamped = point(pt.x.clamp(bounds.left(), bounds.right()), pt.y.clamp(bounds.top() + px(1.), bounds.bottom() - px(1.)));
-                let ix = match layout.index_for_position(clamped) {
-                    Ok(i) | Err(i) => i,
-                };
+                let ix = closest_index_for_position(layout, clamped);
                 let ix = frame.maps.get(&(b, c)).map_or(ix, |m| m.d2m(ix));
                 best = Some((d, Pos::new(b, c, ix)));
             }
@@ -408,13 +425,14 @@ impl Editor {
         window.focus(&self.focus);
         let layout = self.frame.borrow().layouts.get(&(b, c)).cloned();
         let Some(layout) = layout else { return };
-        let raw = match layout.index_for_position(ev.position) {
+        let hit = layout.index_for_position(ev.position);
+        let raw_hit = match hit {
             Ok(i) | Err(i) => i,
         };
         let map = self.frame.borrow().maps.get(&(b, c)).cloned();
-        // 点击行内公式：打开公式编辑浮层
+        // 点击行内公式 / 折叠占位：按落点命中的真实字符判定
         if let Some(m) = &map {
-            if let Ok(i) = layout.index_for_position(ev.position) {
+            if let Ok(i) = hit {
                 // 点击折叠占位「⋯」：展开
                 if let Some(off) = m.fold_at(i) {
                     if let Some(blk) = self.content.blocks.get(b) {
@@ -433,11 +451,14 @@ impl Editor {
                 }
             }
         }
-        let ix = map.as_ref().map_or(raw, |m| m.d2m(raw));
-        let p = self.clamp(Pos::new(b, c, ix));
+        // 单击落光标取最近字形边界（点字符右半边落到字符后）；双击选词按落点所在字符
+        let caret_raw = if ev.click_count == 2 { raw_hit } else { closest_index_for_position(&layout, ev.position) };
+        let hit_p = self.clamp(Pos::new(b, c, map.as_ref().map_or(raw_hit, |m| m.d2m(raw_hit))));
+        let p = self.clamp(Pos::new(b, c, map.as_ref().map_or(caret_raw, |m| m.d2m(caret_raw))));
         // 音频时间戳：单击即跳转播放
-        if ev.click_count == 1 && !ev.modifiers.shift {
-            let url = self.slot_text((b, c)).and_then(|t| t.runs().find(|(r, _)| r.start <= p.offset && p.offset < r.end).and_then(|(_, m)| m.link.clone()));
+        if ev.click_count == 1 && !ev.modifiers.shift && hit.is_ok() {
+            let url =
+                self.slot_text((b, c)).and_then(|t| t.runs().find(|(r, _)| r.start <= hit_p.offset && hit_p.offset < r.end).and_then(|(_, m)| m.link.clone()));
             if let Some((secs, name)) = url.as_deref().and_then(super::links::seek_link_target) {
                 let name = name.to_string();
                 self.seek_to_stamp(secs, &name, cx);
@@ -445,8 +466,9 @@ impl Editor {
             }
         }
         // ⌘ + 点击打开链接
-        if ev.modifiers.platform {
-            let url = self.slot_text((b, c)).and_then(|t| t.runs().find(|(r, _)| r.start <= p.offset && p.offset < r.end).and_then(|(_, m)| m.link.clone()));
+        if ev.modifiers.platform && hit.is_ok() {
+            let url =
+                self.slot_text((b, c)).and_then(|t| t.runs().find(|(r, _)| r.start <= hit_p.offset && hit_p.offset < r.end).and_then(|(_, m)| m.link.clone()));
             if let Some(url) = url {
                 self.open_link(&url, cx);
                 return;

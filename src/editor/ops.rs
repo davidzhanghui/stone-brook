@@ -258,7 +258,11 @@ impl Editor {
             self.pop.slash = Some(SlashMenu { block: h.block, start: h.offset - ch.len_utf8(), selected: 0, scrolled: Default::default() });
             return;
         }
-        if ch == ' ' && kind == BlockKind::Text && h.cell == 0 {
+        if ch == ' '
+            && h.block > 0
+            && h.cell == 0
+            && matches!(kind, BlockKind::Text | BlockKind::Heading { .. } | BlockKind::Bullet | BlockKind::Ordered | BlockKind::Todo { .. } | BlockKind::Quote)
+        {
             self.try_block_shortcut();
             return;
         }
@@ -311,6 +315,15 @@ impl Editor {
         let b = self.block_mut(h.block);
         b.text.delete(0..h.offset);
         b.kind = kind;
+        if matches!(b.kind, BlockKind::Heading { .. }) {
+            b.indent = 0;
+        }
+        if !matches!(b.kind, BlockKind::Ordered) {
+            b.num = None;
+        }
+        if matches!(b.kind, BlockKind::Code { .. }) {
+            b.collapsed = false;
+        }
         self.core.head.offset = 0;
         self.core.anchor = self.core.head;
         self.core.pending_marks = None;

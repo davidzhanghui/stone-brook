@@ -743,3 +743,197 @@ fn select_to_doc_start_stops_at_body(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 代码块鼠标落光标：
+/// 1. 新建空代码块（默认关闭自动换行）移出光标后，点击代码块正文任意空白处能把光标放回去；
+/// 2. 非空代码块点击行尾空白处或末字符右半边，一次点击即可将光标放到行尾。
+#[gpui::test]
+fn code_block_click_empty_and_line_end(cx: &mut TestAppContext) {
+    use gpui::{point, px, Modifiers};
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-code-click-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("代码块点击测试")),
+        Block::new(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, RichText::default()),
+        Block::text("代码块下方段落"),
+    ]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "code-click".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+
+    // 1. 空代码块：把光标移到下方段落，再点击空代码块正文右侧空白区域，光标应回到代码块
+    let code_ix = 1;
+    let below_ix = 2;
+    let empty_bounds = win
+        .update(&mut vcx, |ed, _, cx| {
+            ed.set_cursor(Pos::new(below_ix, 0, 0), false, cx);
+            ed.frame.borrow().layouts.get(&(code_ix, 0)).map(|l| l.bounds())
+        })
+        .unwrap()
+        .expect("空代码块应已登记文本布局");
+    vcx.run_until_parked();
+    vcx.simulate_click(point(empty_bounds.left() + px(120.), empty_bounds.top() + px(10.)), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 0), "点击空代码块空白处应把光标移回代码块");
+    })
+    .unwrap();
+
+    // 2. 非空代码块：点击内容右侧空白、末字符右半边都能一次落到末尾；点末字符左半边落在末字符前
+    win.update(&mut vcx, |ed, _, cx| {
+        std::sync::Arc::make_mut(&mut ed.content.blocks[code_ix]).text = RichText::plain("hello world");
+        ed.set_cursor(Pos::new(below_ix, 0, 0), false, cx);
+        cx.notify();
+    })
+    .unwrap();
+    vcx.run_until_parked();
+    let (bounds, last_left, last_right) = win
+        .update(&mut vcx, |ed, _, _| {
+            let f = ed.frame.borrow();
+            let l = f.layouts.get(&(code_ix, 0)).expect("非空代码块应有布局");
+            let p0 = l.position_for_index(10).expect("末字符起点");
+            let p1 = l.position_for_index(11).expect("末字符终点");
+            (l.bounds(), p0, p1)
+        })
+        .unwrap();
+    let mid_y = bounds.top() + px(10.);
+
+    // 2a. 点击内容右侧空白处
+    vcx.simulate_click(point(bounds.right() + px(80.), mid_y), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 11), "点击代码块内容右侧空白应直接落到行尾");
+    })
+    .unwrap();
+
+    // 2b. 点击末字符右半边（贴近末尾）
+    win.update(&mut vcx, |ed, _, cx| ed.set_cursor(Pos::new(code_ix, 0, 0), false, cx)).unwrap();
+    vcx.run_until_parked();
+    let right_half_x = last_left.x + (last_right.x - last_left.x) * 0.75;
+    vcx.simulate_click(point(right_half_x, mid_y), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 11), "点击末字符右半边应落到字符之后");
+    })
+    .unwrap();
+
+    // 2c. 点击末字符左半边（应落在末字符之前）
+    let left_half_x = last_left.x + (last_right.x - last_left.x) * 0.25;
+    vcx.simulate_click(point(left_half_x, mid_y), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 10), "点击末字符左半边应落到字符之前");
+    })
+    .unwrap();
+
+    // 3. 多行代码块：点击较短行右侧空白落在该行行尾，点击末行右侧空白落在全文末尾
+    win.update(&mut vcx, |ed, _, cx| {
+        std::sync::Arc::make_mut(&mut ed.content.blocks[code_ix]).text = RichText::plain("short\na much longer second line\nend");
+        ed.set_cursor(Pos::new(below_ix, 0, 0), false, cx);
+        cx.notify();
+    })
+    .unwrap();
+    vcx.run_until_parked();
+    let (mb, line1_y, line3_y) = win
+        .update(&mut vcx, |ed, _, _| {
+            let f = ed.frame.borrow();
+            let l = f.layouts.get(&(code_ix, 0)).expect("多行代码块应有布局");
+            let y1 = l.position_for_index(0).unwrap().y + px(10.);
+            let y3 = l.position_for_index(32).unwrap().y + px(10.);
+            (l.bounds(), y1, y3)
+        })
+        .unwrap();
+    vcx.simulate_click(point(mb.right() + px(80.), line1_y), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 5), "点击第一行右侧空白应落到第一行行尾");
+    })
+    .unwrap();
+    vcx.simulate_click(point(mb.right() + px(80.), line3_y), Modifiers::none());
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        assert_eq!(ed.core.head, Pos::new(code_ix, 0, 35), "点击末行右侧空白应落到全文末尾");
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 类似飞书/Notion：在标题、列表、待办、引用等文本类块的行首输入 Markdown 快捷语法可直接转换块类型；
+/// 标题行（block 0）与代码块不受影响。
+#[gpui::test]
+fn block_markdown_shortcut_across_textual_kinds(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-md-shortcut-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let mut bullet = Block::new(BlockKind::Bullet, RichText::plain("缩进条目"));
+    bullet.indent = 2;
+    let mut ordered = Block::new(BlockKind::Ordered, RichText::plain("有序条目"));
+    ordered.num = Some(5);
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("文档标题")),
+        Block::new(BlockKind::Heading { level: 3 }, RichText::plain("节点3")),
+        bullet,
+        ordered,
+        Block::new(BlockKind::Quote, RichText::plain("引用内容")),
+        Block::new(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, RichText::plain("code")),
+    ]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "md-shortcut".into(), doc, cx));
+    win.update(cx, |ed, _, cx| {
+        let type_str = |ed: &mut Editor, b: usize, s: &str, cx: &mut gpui::Context<Editor>| {
+            ed.set_cursor(Pos::new(b, 0, 0), false, cx);
+            for ch in s.chars() {
+                let mut buf = [0u8; 4];
+                ed.insert_text(ch.encode_utf8(&mut buf), cx);
+            }
+        };
+
+        // H3 行首输入 "#### " -> 变为 H4，保留正文
+        type_str(ed, 1, "#### ", cx);
+        assert_eq!(ed.content.blocks[1].kind, BlockKind::Heading { level: 4 });
+        assert_eq!(ed.content.blocks[1].text.text, "节点3");
+        assert_eq!(ed.core.head, Pos::new(1, 0, 0));
+
+        // 缩进列表行首输入 "## " -> 变为 H2 且缩进清零
+        type_str(ed, 2, "## ", cx);
+        assert_eq!(ed.content.blocks[2].kind, BlockKind::Heading { level: 2 });
+        assert_eq!(ed.content.blocks[2].indent, 0);
+        assert_eq!(ed.content.blocks[2].text.text, "缩进条目");
+
+        // 有序列表（带自定义编号）行首输入 "> " -> 变为引用且清掉 num
+        type_str(ed, 3, "> ", cx);
+        assert_eq!(ed.content.blocks[3].kind, BlockKind::Quote);
+        assert_eq!(ed.content.blocks[3].num, None);
+        assert_eq!(ed.content.blocks[3].text.text, "有序条目");
+
+        // 引用行首输入 "[] " -> 变为待办；待办行首输入 "``` " -> 变为代码块
+        type_str(ed, 4, "[] ", cx);
+        assert_eq!(ed.content.blocks[4].kind, BlockKind::Todo { checked: false });
+        assert_eq!(ed.content.blocks[4].text.text, "引用内容");
+        type_str(ed, 4, "``` ", cx);
+        assert!(matches!(ed.content.blocks[4].kind, BlockKind::Code { .. }));
+        assert_eq!(ed.content.blocks[4].text.text, "引用内容");
+
+        // 代码块行首输入 "# " 不应转换
+        type_str(ed, 5, "# ", cx);
+        assert!(matches!(ed.content.blocks[5].kind, BlockKind::Code { .. }));
+        assert_eq!(ed.content.blocks[5].text.text, "# code");
+
+        // 文档标题（block 0）行首输入 "## " 不应转换
+        type_str(ed, 0, "## ", cx);
+        assert_eq!(ed.content.blocks[0].kind, BlockKind::Title);
+        assert_eq!(ed.content.blocks[0].text.text, "## 文档标题");
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
