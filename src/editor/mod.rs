@@ -973,7 +973,8 @@ impl Editor {
         let p = self.snap_merge(self.clamp(p));
         // 光标进入折叠 / 聚焦之外的区域：先展开
         self.caches.fold_cache.get_mut().take();
-        if self.reveal_block(p.block) {
+        let revealed = self.reveal_block(p.block);
+        if revealed {
             self.list.reset(self.content.blocks.len());
             self.schedule_save(cx);
         }
@@ -995,8 +996,69 @@ impl Editor {
         self.pop.lang_search = None;
         self.pop.ordered_menu = None;
         self.pop.mention = None;
+        if !revealed && !self.core.selecting {
+            self.follow_code_scroll();
+        }
         self.reveal_head();
         cx.notify();
+    }
+
+    /// 键盘移动光标到代码块可视区之外时，在当前帧绘制前立刻同步横/纵向滚动偏移，避免多等一帧。
+    fn follow_code_scroll(&self) {
+        let h = self.core.head;
+        let Some(blk) = self.content.blocks.get(h.block) else { return };
+        let crate::model::BlockKind::Code { wrap, .. } = blk.kind else { return };
+        let mut frame = self.frame.borrow_mut();
+        let Some(layout) = frame.layouts.get(&(h.block, 0)).cloned() else { return };
+        let d = frame.maps.get(&(h.block, 0)).map_or(h.offset, |m| m.m2d(h.offset));
+        let Some(p) = layout.position_for_index(d) else { return };
+        let mut seen = true;
+        if !wrap {
+            if let Some((hs, _)) = self.caches.code_scroll.borrow().get(&blk.id) {
+                let vb = hs.bounds();
+                if vb.size.width > px(0.) {
+                    let pad = px(16.);
+                    let mut off = hs.offset();
+                    if p.x < vb.left() + pad {
+                        off.x += vb.left() + pad - p.x;
+                    } else if p.x > vb.right() - pad {
+                        off.x -= p.x - (vb.right() - pad);
+                    }
+                    off.x = off.x.clamp(-hs.max_offset().width, px(0.));
+                    if off.x != hs.offset().x {
+                        hs.set_offset(off);
+                    }
+                } else {
+                    seen = false;
+                }
+            } else {
+                seen = false;
+            }
+        }
+        if let Some((vs, _)) = self.caches.code_vscroll.borrow().get(&blk.id) {
+            let vb = vs.bounds();
+            if vb.size.height > px(0.) {
+                let lh = layout.line_height();
+                let pad = px(8.);
+                let mut off = vs.offset();
+                if p.y < vb.top() + pad {
+                    off.y += vb.top() + pad - p.y;
+                } else if p.y + lh > vb.bottom() - pad {
+                    off.y -= p.y + lh - (vb.bottom() - pad);
+                }
+                off.y = off.y.clamp(-vs.max_offset().height, px(0.));
+                if off.y != vs.offset().y {
+                    vs.set_offset(off);
+                }
+            } else {
+                seen = false;
+            }
+        } else {
+            seen = false;
+        }
+        if seen {
+            frame.code_caret_last = Some((blk.id, d));
+        }
     }
 
     /// 光标落进被合并覆盖的单元格时，归位到合并区左上角。

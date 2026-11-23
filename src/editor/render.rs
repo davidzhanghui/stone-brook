@@ -539,6 +539,8 @@ impl Editor {
                                 if follow {
                                     if let Some(cid) = caret_block {
                                         if f.code_caret_last != Some((cid, o)) {
+                                            let mut seen = true;
+                                            let mut scrolled = false;
                                             // 横向：关闭自动换行时长行滚回可视区
                                             if let Some(hs) = hscroll.as_ref() {
                                                 let vb = hs.bounds();
@@ -553,14 +555,15 @@ impl Editor {
                                                     off.x = off.x.clamp(-hs.max_offset().width, px(0.));
                                                     if off.x != hs.offset().x {
                                                         hs.set_offset(off);
-                                                        window.refresh();
+                                                        scrolled = true;
                                                     }
+                                                } else {
+                                                    seen = false;
                                                 }
                                             }
                                             // 纵向：默认 15 行限高后，光标走到被裁掉的行时滚回来。
                                             // 滚动容器的句柄在子节点之后才更新（本帧可能还是上一帧的
                                             // 尺寸），拿不到可视区就先不记住光标位置，下一帧再试。
-                                            let mut seen = true;
                                             if let Some(vs) = vscroll.as_ref() {
                                                 let vb = vs.bounds();
                                                 if vb.size.height > px(0.) {
@@ -574,11 +577,16 @@ impl Editor {
                                                     off.y = off.y.clamp(-vs.max_offset().height, px(0.));
                                                     if off.y != vs.offset().y {
                                                         vs.set_offset(off);
-                                                        window.refresh();
+                                                        scrolled = true;
                                                     }
                                                 } else {
                                                     seen = false;
                                                 }
+                                            }
+                                            if scrolled {
+                                                // 绘制阶段内直接 window.refresh() 会被 GPUI 忽略（not_drawing() 为 false），
+                                                // 必须挂到下一帧开头触发重绘，避免等到光标闪烁才更新滚动位置。
+                                                window.on_next_frame(|window, _| window.refresh());
                                             }
                                             if seen {
                                                 f.code_caret_last = Some((cid, o));

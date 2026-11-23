@@ -937,3 +937,64 @@ fn block_markdown_shortcut_across_textual_kinds(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 长单行代码块：用快捷键跳转到行尾 / 行首时，横向滚动条应立刻跟随，无需等待下次光标闪烁。
+#[gpui::test]
+fn code_block_long_line_scroll_immediate(cx: &mut TestAppContext) {
+    use gpui::px;
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-code-hscroll-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let long_line = "a".repeat(240);
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("长行滚动测试")),
+        Block::new(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, RichText::plain(&long_line)),
+    ]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "code-hscroll".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+
+    let code_ix = 1;
+    // 先把光标放到代码块行首，确认已具备可横向滚动的宽度
+    let max_x = win
+        .update(&mut vcx, |ed, window, cx| {
+            window.focus(&ed.focus);
+            ed.set_cursor(Pos::new(code_ix, 0, 0), false, cx);
+            let bid = ed.content.blocks[code_ix].id;
+            ed.caches.code_scroll.borrow().get(&bid).map(|(h, _)| h.max_offset().width).unwrap_or(px(0.))
+        })
+        .unwrap();
+    assert!(max_x > px(100.), "长单行代码块应产生横向滚动范围，实际 max_x={max_x:?}");
+
+    // 跳转到行尾：set_cursor 当场即已把横向偏移滚到最右端，且首帧绘制后光标已在可视区内
+    win.update(&mut vcx, |ed, window, cx| {
+        ed.line_end(&LineEnd, window, cx);
+        let bid = ed.content.blocks[code_ix].id;
+        let off_x = ed.caches.code_scroll.borrow().get(&bid).map(|(h, _)| h.offset().x).unwrap();
+        assert!(off_x <= -max_x + px(1.), "快捷键跳到行尾后横向滚动条应立刻到达末端，实际 off_x={off_x:?}, max_x={max_x:?}");
+    })
+    .unwrap();
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, _, _| {
+        let bid = ed.content.blocks[code_ix].id;
+        let vb = ed.caches.code_scroll.borrow().get(&bid).unwrap().0.bounds();
+        let caret = ed.frame.borrow().cursor.expect("应有光标矩形");
+        assert!(caret.left() >= vb.left() && caret.right() <= vb.right(), "跳到行尾后光标应在可视区内：caret={caret:?}, vb={vb:?}");
+    })
+    .unwrap();
+
+    // 跳转回行首：横向偏移应立刻回到 0
+    win.update(&mut vcx, |ed, window, cx| {
+        ed.line_start(&LineStart, window, cx);
+        let bid = ed.content.blocks[code_ix].id;
+        let off_x = ed.caches.code_scroll.borrow().get(&bid).map(|(h, _)| h.offset().x).unwrap();
+        assert_eq!(off_x, px(0.), "快捷键跳回行首后横向滚动条应立刻回到 0");
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
