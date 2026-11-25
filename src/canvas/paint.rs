@@ -346,7 +346,7 @@ pub fn paint_text_rich(
     opacity: f32,
     align: Align,
 ) {
-    if text.is_empty() || size_px < 3.5 {
+    if text.is_empty() || size_px < 1.5 {
         return;
     }
     let lh = px(size_px * 1.38);
@@ -382,7 +382,7 @@ pub fn paint_text_rich(
 
 /// 单行文字，按锚点对齐。
 pub fn paint_label(window: &mut Window, cx: &mut App, text: &str, at: Point<Pixels>, size_px: f32, color: Hsla, bold: bool, anchor: Anchor, bg: Option<Hsla>) {
-    if text.is_empty() || size_px < 3.5 {
+    if text.is_empty() || size_px < 1.5 {
         return;
     }
     let lh = px(size_px * 1.3);
@@ -399,7 +399,10 @@ pub fn paint_label(window: &mut Window, cx: &mut App, text: &str, at: Point<Pixe
         };
         let y = at.y - lh * (n / 2.) + lh * i as f32;
         if let Some(bg) = bg {
-            window.paint_quad(fill(Bounds::new(point(x - px(4.), y - px(1.)), size(w + px(8.), lh + px(2.))), bg).corner_radii(px(4.)));
+            let pad_x = (size_px * 0.32).clamp(1.5, 4.5);
+            let pad_y = (size_px * 0.1).clamp(0.5, 1.5);
+            let rad = (size_px * 0.3).clamp(1.5, 4.);
+            window.paint_quad(fill(Bounds::new(point(x - px(pad_x), y - px(pad_y)), size(w + px(pad_x * 2.), lh + px(pad_y * 2.))), bg).corner_radii(px(rad)));
         }
         shaped.paint(point(x, y), lh, window, cx).ok();
     }

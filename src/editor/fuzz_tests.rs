@@ -1033,3 +1033,64 @@ fn paste_fragment_into_diagram_stays_in_source_slot(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 对齐飞书：
+/// 1. 代码块语言下拉列表中不包含 Mermaid（但语法高亮仍保留供文本绘图与画板使用）；
+/// 2. 粘贴完整的 ```mermaid ... ``` 或网页 `<code class="language-mermaid">` 块时，自动转为带可编辑源码分区的画板嵌入块。
+#[gpui::test]
+fn paste_fenced_mermaid_converts_to_board_embed(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-mermaid-board-paste-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+
+    // 1. 代码块语言列表不含 Mermaid，但 highlight("Mermaid", ...) 仍正常工作
+    assert!(!crate::highlight::filter_langs("").contains(&"Mermaid"));
+    assert!(crate::highlight::filter_langs("mermaid").is_empty());
+    assert!(!crate::highlight::highlight("Mermaid", "flowchart TD\nA --> B").is_empty());
+
+    // 2. 粘贴合法 ```mermaid ... ``` 经 md_to_blocks + upgrade_mermaid_blocks_to_board 转为画板嵌入块
+    let md = "```mermaid\nflowchart TD\n    A[\"开始\"] --> B{\"判断\"}\n    B -->|\"是\"| C[\"结束\"]\n```";
+    let mut blocks = crate::convert::md_to_blocks(md);
+    assert_eq!(blocks.len(), 1);
+    let (n, err) = super::clip::upgrade_mermaid_blocks_to_board(&mut blocks, false);
+    assert_eq!(n, 1);
+    assert!(err.is_none());
+
+    // 2b. 粘贴语法错误的 ```mermaid ... ``` 时，回落为 Plain Text 代码块并返回错误说明
+    let bad_md = "```mermaid\nflowchart TD\n    A[未闭合 --> B\n```";
+    let mut bad_blocks = crate::convert::md_to_blocks(bad_md);
+    let (bad_n, bad_err) = super::clip::upgrade_mermaid_blocks_to_board(&mut bad_blocks, false);
+    assert_eq!(bad_n, 0);
+    assert!(bad_err.is_some(), "语法错误应返回具体提示");
+    assert!(matches!(&bad_blocks[0].kind, BlockKind::Code { lang, .. } if lang == "Plain Text"));
+    assert!(bad_blocks[0].text.text.contains("A[未闭合 --> B"));
+    let BlockKind::Embed { kind, id } = &blocks[0].kind else {
+        panic!("应转换为画板嵌入块，实际：{:?}", blocks[0].kind);
+    };
+    assert_eq!(kind, "board");
+    let crate::objects::ObjData::Board(board) = crate::objects::load(id).expect("应已持久化到 objects 表") else {
+        panic!("嵌入对象应为画板");
+    };
+    // 画板内应包含带 Mermaid 源码的代码分区与已展开的图形/连线
+    assert!(board.els.iter().any(|e| e.code.as_deref().is_some_and(|c| c.contains("flowchart TD")) && e.code_lang == 1));
+    assert!(board.els.iter().any(|e| matches!(e.kind, crate::board::model::ElKind::Connector { route: crate::board::model::Route::RoundElbow, .. })));
+
+    // 3. 插入到文档正文后正常成为画板嵌入块
+    let doc = DocContent::from_blocks(vec![Block::new(BlockKind::Title, RichText::plain("飞书对齐测试")), Block::text("")]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "mermaid-board-paste".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, window, cx| {
+        window.focus(&ed.focus);
+        ed.set_cursor(Pos::new(1, 0, 0), false, cx);
+        ed.insert_fragment(blocks, cx);
+        assert!(ed.content.blocks.iter().any(|b| matches!(&b.kind, BlockKind::Embed { kind, .. } if kind == "board")));
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}

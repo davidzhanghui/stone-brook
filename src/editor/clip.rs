@@ -128,7 +128,10 @@ impl Editor {
         let in_code = in_source_like;
         // 往代码块 / 源码块（公式、文本绘图、HTML）里粘贴：直接用纯文本。富文本还原会把缩进当排版空白折叠掉
         //（来源是「每行一个 div」的网页代码块时尤其明显），或把 <pre><code> 还原成独立代码块插入到下方。
-        let prefer_text = in_code && clip.text.as_deref().is_some_and(|t| !t.trim().is_empty());
+        // 若用户在普通正文里直接粘贴完整围栏的 ```mermaid ... ```，也跳过编辑器自带的高亮 HTML 直接走 Markdown 解析，
+        // 以便对齐飞书自动转为画板 Mermaid 图。
+        let fenced_mermaid = !plain && !in_code && clip.stonebrook.is_none() && clip.text.as_deref().is_some_and(is_fenced_mermaid);
+        let prefer_text = (in_code || fenced_mermaid) && clip.text.as_deref().is_some_and(|t| !t.trim().is_empty());
         let mut source = "";
         let mut blocks: Vec<Block> = Vec::new();
         if !plain {
@@ -174,19 +177,31 @@ impl Editor {
             let text = blocks.iter().map(|b| b.plain_text()).collect::<Vec<_>>().join("\n");
             blocks = vec![Block::new(BlockKind::Text, RichText::plain(text))];
         }
+        // 对齐飞书：在正文中粘贴 ```mermaid ... ``` 或网页中的 mermaid 代码块时，自动转换为画板中的 Mermaid 图；
+        // 若源码语法有误，则保留为 Plain Text 代码块并提示具体报错原因。
+        let mut mermaid_boards = 0usize;
+        let mut mermaid_err: Option<String> = None;
+        if !plain && !in_code && source != "stonebrook" {
+            let dark = crate::theme::theme(cx).dark;
+            (mermaid_boards, mermaid_err) = upgrade_mermaid_blocks_to_board(&mut blocks, dark);
+        }
         let n = blocks.len();
         let remote = blocks.iter().any(|b| matches!(&b.kind, BlockKind::Image { path, .. } if path.starts_with("http")));
         self.insert_fragment(blocks, cx);
         if remote {
             self.fetch_remote_images(cx);
         }
-        if n > 1 {
+        if let Some(err) = mermaid_err {
+            cx.emit(EditorEvent::Toast(format!("Mermaid 语法有误（{err}），已保留为代码块")));
+        } else if n > 1 {
             let msg = match source {
                 "html" => format!("已从富文本还原 {n} 个块"),
                 "markdown" => format!("已将 Markdown 转换为 {n} 个块"),
                 _ => format!("已粘贴 {n} 个块"),
             };
             cx.emit(EditorEvent::Toast(msg));
+        } else if mermaid_boards > 0 {
+            cx.emit(EditorEvent::Toast("已自动将 Mermaid 转换为画板图表".into()));
         }
     }
 
@@ -544,4 +559,73 @@ fn table_region(cells: &[RichText], cols: usize, merges: &[crate::model::CellMer
         },
         RichText::default(),
     )
+}
+
+/// 判断纯文本是否为完整的围栏 Mermaid 块（```` ```mermaid ... ``` ```` 或 `~~~mermaid ... ~~~`）。
+fn strip_fenced_mermaid(raw: &str) -> Option<String> {
+    let s = raw.replace("\r\n", "\n");
+    let trimmed = s.trim();
+    let mut lines = trimmed.lines();
+    let first = lines.next()?.trim();
+    let fence = if first.starts_with("```") {
+        "```"
+    } else if first.starts_with("~~~") {
+        "~~~"
+    } else {
+        return None;
+    };
+    let info = first[fence.len()..].trim();
+    if !info.eq_ignore_ascii_case("mermaid") {
+        return None;
+    }
+    let rest: Vec<&str> = lines.collect();
+    let last = rest.last()?.trim();
+    if !last.starts_with(fence) || !last[fence.len()..].trim().is_empty() {
+        return None;
+    }
+    let body = rest[..rest.len() - 1].join("\n");
+    (!body.trim().is_empty()).then_some(body)
+}
+
+fn is_fenced_mermaid(raw: &str) -> bool {
+    strip_fenced_mermaid(raw).is_some()
+}
+
+/// 将粘贴得到的 Mermaid 块（来自 Markdown ` ```mermaid ` 或网页 `<code class="language-mermaid">`）
+/// 自动转换为画板嵌入块（`BlockKind::Embed { kind: "board", .. }`），并保留可二次编辑的 Mermaid 源码分区；
+/// 若源码为空或存在语法错误，则回落为 `Plain Text` 代码块并返回首个报错信息。
+pub(super) fn upgrade_mermaid_blocks_to_board(blocks: &mut [Block], dark: bool) -> (usize, Option<String>) {
+    let mut converted = 0usize;
+    let mut first_err: Option<String> = None;
+    for b in blocks.iter_mut() {
+        let src: Option<String> = match &b.kind {
+            BlockKind::Diagram { .. } => Some(b.text.text.clone()),
+            BlockKind::Code { lang, .. } if lang.eq_ignore_ascii_case("mermaid") => Some(b.text.text.clone()),
+            BlockKind::Code { .. } => strip_fenced_mermaid(&b.text.text),
+            _ => None,
+        };
+        let Some(src) = src else { continue };
+        let trimmed = src.trim();
+        if trimmed.is_empty() {
+            b.kind = BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None };
+            b.text = RichText::plain(src);
+            continue;
+        }
+        match crate::board::mermaid_board(trimmed, dark) {
+            Ok(board) => {
+                let id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(std::sync::Arc::new(board))));
+                *b = Block::new(BlockKind::Embed { kind: "board".into(), id }, RichText::default());
+                converted += 1;
+            }
+            Err(err) => {
+                // 对齐飞书：语法有误无法转画板时，原样保留为 Plain Text 代码块并通过 Toast 告知具体错误
+                b.kind = BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None };
+                b.text = RichText::plain(trimmed.to_string());
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+    }
+    (converted, first_err)
 }
