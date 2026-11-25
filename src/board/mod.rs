@@ -170,7 +170,7 @@ pub fn auto_layout(b: &mut BoardDoc) {
     for el in &b.els {
         if let ElKind::Connector { a: End::Bound { el: x, .. }, b: End::Bound { el: y, .. }, .. } = &el.kind {
             if let (Some(&fx), Some(&fy)) = (pos_of.get(x), pos_of.get(y)) {
-                edges.push(LEdge { from: fx, to: fy, minlen: 1 });
+                edges.push(LEdge { from: fx, to: fy, minlen: 1, label_w: 0. });
             }
         }
     }

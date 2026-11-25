@@ -60,7 +60,12 @@ pub fn translate(it: &mut Item, dx: f32, dy: f32) {
             s.rect.x += dx;
             s.rect.y += dy;
         }
-        Item::Line(l) => l.points.iter_mut().for_each(|p| *p = p.add(d)),
+        Item::Line(l) => {
+            l.points.iter_mut().for_each(|p| *p = p.add(d));
+            if let Some(p) = &mut l.label_pos {
+                *p = p.add(d);
+            }
+        }
         Item::Text(t) => t.pos = t.pos.add(d),
         Item::Path(p) => {
             for c in &mut p.cmds {
@@ -858,6 +863,22 @@ pub fn smooth_cmds(pts: &[Pt]) -> Vec<PathCmd> {
     out
 }
 
+/// 根据端点切向 `d` 计算不会过冲的控制柄长度。
+fn clamped_handle(p: Pt, q: Pt, d: Pt) -> f32 {
+    let v = q.sub(p);
+    let dist = (v.x * v.x + v.y * v.y).sqrt();
+    if dist < 1e-3 {
+        return 0.;
+    }
+    let proj = v.x * d.x + v.y * d.y;
+    if proj > 0. {
+        // 沿切向的投影长度取半，保证单调前进、绝不回勾过冲
+        (proj * 0.5).clamp((dist * 0.18).min(16.), (dist * 0.42).min(proj * 0.72))
+    } else {
+        (dist * 0.16).clamp(8., 22.)
+    }
+}
+
 /// 经过所有点的平滑曲线，两端沿给定方向伸出（da 为起点朝外方向，db 为终点朝外方向）。
 pub fn smooth_cmds_dir(pts: &[Pt], da: Pt, db: Pt) -> Vec<PathCmd> {
     let n = pts.len();
@@ -866,21 +887,204 @@ pub fn smooth_cmds_dir(pts: &[Pt], da: Pt, db: Pt) -> Vec<PathCmd> {
     }
     let (a, b) = (pts[0], pts[n - 1]);
     if n == 2 {
-        let k = a.dist(b) * 0.45;
-        return vec![PathCmd::Move(a), PathCmd::Cubic(a.add(da.scale(k)), b.add(db.scale(k)), b)];
+        let ka = clamped_handle(a, b, da);
+        let kb = clamped_handle(b, a, db);
+        return vec![PathCmd::Move(a), PathCmd::Cubic(a.add(da.scale(ka)), b.add(db.scale(kb)), b)];
     }
     let mut cmds = smooth_cmds(pts);
     if let Some(PathCmd::Cubic(c1, _, _)) = cmds.get_mut(1) {
-        *c1 = a.add(da.scale(a.dist(pts[1]) * 0.45));
+        *c1 = a.add(da.scale(clamped_handle(a, pts[1], da)));
     }
     if let Some(PathCmd::Cubic(_, c2, _)) = cmds.last_mut() {
-        *c2 = b.add(db.scale(b.dist(pts[n - 2]) * 0.45));
+        *c2 = b.add(db.scale(clamped_handle(b, pts[n - 2], db)));
     }
     cmds
 }
 
+/// 无过冲均匀三次 B 样条（同 D3 `curveBasis`）：严格落在控制多边形凸包内，
+/// 共线虚拟节点保持绝对笔直，拐角圆滑过渡，绝不出现 Catmull-Rom 甩尾/打钩。
+pub fn basis_cmds(pts: &[Pt]) -> Vec<PathCmd> {
+    let n = pts.len();
+    if n < 3 {
+        return polyline_cmds(pts);
+    }
+    let mix = |a: Pt, wa: f32, b: Pt, wb: f32| pt(a.x * wa + b.x * wb, a.y * wa + b.y * wb);
+    let tri = |a: Pt, b: Pt, c: Pt| pt((a.x + 4. * b.x + c.x) / 6., (a.y + 4. * b.y + c.y) / 6.);
+    let mut out = Vec::with_capacity(n + 1);
+    out.push(PathCmd::Move(pts[0]));
+    // 首段：从 pts[0] 平滑切出，切向沿 pts[1] - pts[0]
+    out.push(PathCmd::Cubic(mix(pts[0], 2. / 3., pts[1], 1. / 3.), mix(pts[0], 1. / 3., pts[1], 2. / 3.), tri(pts[0], pts[1], pts[2])));
+    // 中间各段：标准均匀三次 B 样条转贝塞尔
+    for i in 1..n - 2 {
+        out.push(PathCmd::Cubic(
+            mix(pts[i], 2. / 3., pts[i + 1], 1. / 3.),
+            mix(pts[i], 1. / 3., pts[i + 1], 2. / 3.),
+            tri(pts[i], pts[i + 1], pts[i + 2]),
+        ));
+    }
+    // 尾段：沿 pts[n-1] - pts[n-2] 平滑落入 pts[n-1]
+    out.push(PathCmd::Cubic(
+        mix(pts[n - 2], 2. / 3., pts[n - 1], 1. / 3.),
+        mix(pts[n - 2], 1. / 3., pts[n - 1], 2. / 3.),
+        pts[n - 1],
+    ));
+    out
+}
+
+/// 带起终点出线方向的均匀三次 B 样条：两端各加一段受限短导引，保证垂直贴边进出且绝不过冲。
+pub fn basis_cmds_dir(pts: &[Pt], da: Pt, db: Pt) -> Vec<PathCmd> {
+    let n = pts.len();
+    if n < 2 {
+        return polyline_cmds(pts);
+    }
+    let (a, b) = (pts[0], pts[n - 1]);
+    if n == 2 {
+        // 近似共线时直接画直线，避免微弱 S 弯
+        let v = b.sub(a);
+        let perp = (v.x * da.y - v.y * da.x).abs();
+        let proj = v.x * da.x + v.y * da.y;
+        let opp = da.x * db.x + da.y * db.y < -0.5;
+        if opp && proj > 0. && perp < 2.5 {
+            return vec![PathCmd::Move(a), PathCmd::Line(b)];
+        }
+        let ka = clamped_handle(a, b, da);
+        let kb = clamped_handle(b, a, db);
+        return vec![PathCmd::Move(a), PathCmd::Cubic(a.add(da.scale(ka)), b.add(db.scale(kb)), b)];
+    }
+    let stub = |p: Pt, q: Pt, d: Pt| -> f32 {
+        let v = q.sub(p);
+        let dist = (v.x * v.x + v.y * v.y).sqrt();
+        if dist < 4. {
+            return 0.;
+        }
+        let proj = v.x * d.x + v.y * d.y;
+        if proj > 4. {
+            (proj * 0.32).clamp(6., 22.).min(dist * 0.45)
+        } else {
+            (dist * 0.14).clamp(6., 18.)
+        }
+    };
+    let mut ctrl = Vec::with_capacity(n + 2);
+    ctrl.push(a);
+    let sa = stub(a, pts[1], da);
+    if sa > 1. {
+        ctrl.push(a.add(da.scale(sa)));
+    }
+    ctrl.extend_from_slice(&pts[1..n - 1]);
+    let sb = stub(b, pts[n - 2], db);
+    if sb > 1. {
+        ctrl.push(b.add(db.scale(sb)));
+    }
+    ctrl.push(b);
+    basis_cmds(&ctrl)
+}
+
+/// 按弧长比例 `t ∈ [0, 1]` 在路径命令上采样一点（用于将边标签精确贴在实际曲线上）。
+pub fn cmds_point_at(cmds: &[PathCmd], t: f32) -> Pt {
+    let mut pts = Vec::new();
+    let mut cur = Pt::default();
+    for c in cmds {
+        match *c {
+            PathCmd::Move(p) => {
+                pts.push(p);
+                cur = p;
+            }
+            PathCmd::Line(p) => {
+                pts.push(p);
+                cur = p;
+            }
+            PathCmd::Cubic(a, b, p) => {
+                for i in 1..=12 {
+                    let s = i as f32 / 12.;
+                    let ms = 1. - s;
+                    let x = ms * ms * ms * cur.x + 3. * ms * ms * s * a.x + 3. * ms * s * s * b.x + s * s * s * p.x;
+                    let y = ms * ms * ms * cur.y + 3. * ms * ms * s * a.y + 3. * ms * s * s * b.y + s * s * s * p.y;
+                    pts.push(pt(x, y));
+                }
+                cur = p;
+            }
+            PathCmd::Close => {}
+        }
+    }
+    if pts.is_empty() {
+        return Pt::default();
+    }
+    if pts.len() == 1 {
+        return pts[0];
+    }
+    let total: f32 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
+    if total <= 1e-4 {
+        return pts[0];
+    }
+    let target = total * t.clamp(0., 1.);
+    let mut acc = 0.;
+    for w in pts.windows(2) {
+        let l = w[0].dist(w[1]);
+        if acc + l >= target && l > 1e-4 {
+            return w[0].lerp(w[1], (target - acc) / l);
+        }
+        acc += l;
+    }
+    *pts.last().unwrap()
+}
+
 pub fn polyline_cmds(pts: &[Pt]) -> Vec<PathCmd> {
     pts.iter().enumerate().map(|(i, p)| if i == 0 { PathCmd::Move(*p) } else { PathCmd::Line(*p) }).collect()
+}
+
+/// 带圆角的折线（用于正交流程图布线）：先剔除重复点与共线中间点，再在每个拐角处用四分之一圆弧近似三次贝塞尔过渡。
+pub fn rounded_polyline_cmds(pts: &[Pt], radius: f32) -> Vec<PathCmd> {
+    if pts.len() < 3 || radius <= 0.5 {
+        return polyline_cmds(pts);
+    }
+    // 1. 清理重复点与共线点
+    let mut clean: Vec<Pt> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if clean.last().is_some_and(|q| q.dist(p) < 0.5) {
+            continue;
+        }
+        while clean.len() >= 2 {
+            let a = clean[clean.len() - 2];
+            let b = clean[clean.len() - 1];
+            let (v1, v2) = (b.sub(a), p.sub(b));
+            let (l1, l2) = ((v1.x * v1.x + v1.y * v1.y).sqrt(), (v2.x * v2.x + v2.y * v2.y).sqrt());
+            if l1 < 1e-3 || l2 < 1e-3 {
+                clean.pop();
+                continue;
+            }
+            let cross = (v1.x * v2.y - v1.y * v2.x).abs() / (l1 * l2);
+            let dot = (v1.x * v2.x + v1.y * v2.y) / (l1 * l2);
+            if cross < 1e-3 && dot > 0. {
+                clean.pop();
+            } else {
+                break;
+            }
+        }
+        clean.push(p);
+    }
+    if clean.len() < 3 {
+        return polyline_cmds(&clean);
+    }
+    let mut out = Vec::with_capacity(clean.len() * 2);
+    out.push(PathCmd::Move(clean[0]));
+    for i in 1..clean.len() - 1 {
+        let (prev, curr, next) = (clean[i - 1], clean[i], clean[i + 1]);
+        let (v1, v2) = (curr.sub(prev), next.sub(curr));
+        let (l1, l2) = ((v1.x * v1.x + v1.y * v1.y).sqrt(), (v2.x * v2.x + v2.y * v2.y).sqrt());
+        let r = radius.min(l1 * 0.48).min(l2 * 0.48);
+        if r < 0.8 {
+            out.push(PathCmd::Line(curr));
+            continue;
+        }
+        let a = pt(curr.x - v1.x / l1 * r, curr.y - v1.y / l1 * r);
+        let b = pt(curr.x + v2.x / l2 * r, curr.y + v2.y / l2 * r);
+        let c1 = a.lerp(curr, K);
+        let c2 = b.lerp(curr, K);
+        out.push(PathCmd::Line(a));
+        out.push(PathCmd::Cubic(c1, c2, b));
+    }
+    out.push(PathCmd::Line(*clean.last().unwrap()));
+    out
 }
 
 /// 折线按长度的中点。

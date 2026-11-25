@@ -399,7 +399,7 @@ pub fn paint_label(window: &mut Window, cx: &mut App, text: &str, at: Point<Pixe
         };
         let y = at.y - lh * (n / 2.) + lh * i as f32;
         if let Some(bg) = bg {
-            window.paint_quad(fill(Bounds::new(point(x - px(3.), y), size(w + px(6.), lh)), bg).corner_radii(px(3.)));
+            window.paint_quad(fill(Bounds::new(point(x - px(4.), y - px(1.)), size(w + px(8.), lh + px(2.))), bg).corner_radii(px(4.)));
         }
         shaped.paint(point(x, y), lh, window, cx).ok();
     }
@@ -409,14 +409,37 @@ pub fn paint_scene(scene: &Scene, view: View, clip: Bounds<Pixels>, window: &mut
     if let Some(bg) = scene.bg {
         window.paint_quad(fill(view.r(rect(0., 0., scene.width, scene.height)), bg.hsla()));
     }
-    for item in &scene.items {
+    // 连续的连线先统一画线体与箭头，再统一画标签，防止交叉连线压住其他边的文字
+    let mut i = 0;
+    while i < scene.items.len() {
+        if matches!(scene.items[i], Item::Line(_)) {
+            let start = i;
+            while i < scene.items.len() && matches!(scene.items[i], Item::Line(_)) {
+                if let Item::Line(l) = &scene.items[i] {
+                    if view.r(scene.items[i].bounds().inflate(4.)).intersects(&clip) {
+                        paint_line_stroke(l, scene.rough, &view, window);
+                    }
+                }
+                i += 1;
+            }
+            for item in &scene.items[start..i] {
+                if let Item::Line(l) = item {
+                    if view.r(item.bounds().inflate(4.)).intersects(&clip) {
+                        paint_line_labels(l, &view, window, cx);
+                    }
+                }
+            }
+            continue;
+        }
+        let item = &scene.items[i];
+        i += 1;
         let b = view.r(item.bounds().inflate(4.));
         if !b.intersects(&clip) {
             continue;
         }
         match item {
             Item::Shape(s) => paint_shape(s, scene.rough, &view, window, cx),
-            Item::Line(l) => paint_line(l, scene.rough, &view, window, cx),
+            Item::Line(_) => {}
             Item::Text(t) => {
                 let at = view.p(t.pos);
                 paint_label(
@@ -647,13 +670,16 @@ pub fn line_cmds(l: &LineItem) -> Vec<PathCmd> {
         }
     }
     match l.tangents {
+        Some((da, db)) if l.curved && l.basis => crate::canvas::geom::basis_cmds_dir(&pts, da, db),
         Some((da, db)) if l.curved => crate::canvas::geom::smooth_cmds_dir(&pts, da, db),
+        _ if l.curved && l.basis && pts.len() > 2 => basis_cmds(&pts),
         _ if l.curved && pts.len() > 2 => smooth_cmds(&pts),
+        _ if !l.curved && l.corner_radius > 0. && pts.len() > 2 => rounded_polyline_cmds(&pts, l.corner_radius),
         _ => polyline_cmds(&pts),
     }
 }
 
-pub fn paint_line(l: &LineItem, rough: bool, view: &View, window: &mut Window, cx: &mut App) {
+pub fn paint_line_stroke(l: &LineItem, rough: bool, view: &View, window: &mut Window) {
     if l.points.len() < 2 {
         return;
     }
@@ -686,10 +712,17 @@ pub fn paint_line(l: &LineItem, rough: bool, view: &View, window: &mut Window, c
             }
         }
     }
+}
+
+pub fn paint_line_labels(l: &LineItem, view: &View, window: &mut Window, cx: &mut App) {
+    if l.points.len() < 2 {
+        return;
+    }
+    let n = l.points.len();
     let fs = l.font_size * view.scale;
     let bg = l.label_bg.map(|c| c.hsla());
     if !l.label.is_empty() {
-        let m = polyline_mid(&l.points);
+        let m = l.label_pos.unwrap_or_else(|| if l.curved || l.corner_radius > 0. { cmds_point_at(&line_cmds(l), 0.5) } else { polyline_mid(&l.points) });
         paint_label(window, cx, &l.label, view.p(m), fs, l.label_color.hsla(), false, Anchor::Middle, bg);
     }
     for (label, a, b) in [(&l.start_label, l.points[0], l.points[1]), (&l.end_label, l.points[n - 1], l.points[n - 2])] {
@@ -700,4 +733,10 @@ pub fn paint_line(l: &LineItem, rough: bool, view: &View, window: &mut Window, c
             paint_label(window, cx, label, view.p(p), fs * 0.92, l.label_color.hsla(), false, Anchor::Middle, None);
         }
     }
+}
+
+#[allow(dead_code)]
+pub fn paint_line(l: &LineItem, rough: bool, view: &View, window: &mut Window, cx: &mut App) {
+    paint_line_stroke(l, rough, view, window);
+    paint_line_labels(l, view, window, cx);
 }

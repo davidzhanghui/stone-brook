@@ -454,6 +454,9 @@ pub fn apply_offsets(scene: &mut Scene, offsets: &BTreeMap<String, (f32, f32)>, 
                                 let p0 = boundary_point(ka, ra, rb.center());
                                 let p1 = boundary_point(kb, rb, ra.center());
                                 l.points = vec![p0, p1];
+                                l.tangents = None;
+                                l.corner_radius = 0.;
+                                l.label_pos = None;
                             }
                         }
                     }

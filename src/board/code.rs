@@ -330,7 +330,7 @@ pub fn explode_scene(scene: &Scene, dark: bool) -> BoardDoc {
                     Route::Curve
                 } else if l.points.len() == 2 {
                     Route::Straight
-                } else if ortho {
+                } else if ortho || l.corner_radius > 0. {
                     Route::Elbow
                 } else {
                     Route::Straight

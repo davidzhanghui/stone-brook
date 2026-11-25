@@ -98,16 +98,22 @@ impl Editor {
 
     fn paste_inner(&mut self, plain: bool, cx: &mut Context<Self>) {
         let clip = clipboard::read();
-        // 选中文字时粘贴网址：直接变成链接
-        if let Some(t) = clip.text.as_deref().map(str::trim) {
-            let (s, e) = self.sel();
-            if !plain && s != e && s.slot() == e.slot() && !t.contains(char::is_whitespace) && (t.starts_with("http://") || t.starts_with("https://")) {
-                self.apply_link(s.slot(), s.offset..e.offset, t, cx);
-                return;
+        // 选中文字时粘贴网址：直接变成链接（代码块 / 源码块里不转成富文本链接）
+        let in_source_like = {
+            let k = &self.content.blocks[self.core.head.block].kind;
+            matches!(k, BlockKind::Code { .. }) || k.is_source()
+        };
+        if !in_source_like {
+            if let Some(t) = clip.text.as_deref().map(str::trim) {
+                let (s, e) = self.sel();
+                if !plain && s != e && s.slot() == e.slot() && !t.contains(char::is_whitespace) && (t.starts_with("http://") || t.starts_with("https://")) {
+                    self.apply_link(s.slot(), s.offset..e.offset, t, cx);
+                    return;
+                }
             }
         }
         // 单独一个网址：插入为链接，并提供「链接 / 标题 / 卡片」选择
-        if !plain && clip.stonebrook.is_none() && clip.image.is_none() {
+        if !plain && !in_source_like && clip.stonebrook.is_none() && clip.image.is_none() {
             if let Some(t) = clip.text.as_deref().map(str::trim).filter(|t| super::urlpaste::is_url(t)) {
                 let html_is_link = clip.html.as_deref().is_none_or(|h| {
                     let text = scraper::Html::parse_fragment(h).root_element().text().collect::<String>();
@@ -119,9 +125,9 @@ impl Editor {
             }
         }
         let assets = self.store.assets_dir();
-        let in_code = matches!(self.content.blocks[self.core.head.block].kind, BlockKind::Code { .. });
-        // 往代码块里粘贴：直接用纯文本。富文本还原会把缩进当排版空白折叠掉
-        //（来源是「每行一个 div」的网页代码块时尤其明显），而纯文本一般保留缩进。
+        let in_code = in_source_like;
+        // 往代码块 / 源码块（公式、文本绘图、HTML）里粘贴：直接用纯文本。富文本还原会把缩进当排版空白折叠掉
+        //（来源是「每行一个 div」的网页代码块时尤其明显），或把 <pre><code> 还原成独立代码块插入到下方。
         let prefer_text = in_code && clip.text.as_deref().is_some_and(|t| !t.trim().is_empty());
         let mut source = "";
         let mut blocks: Vec<Block> = Vec::new();
@@ -196,10 +202,10 @@ impl Editor {
         let h = self.core.head;
         let target = self.content.blocks[h.block].kind.clone();
         let inline = blocks.len() == 1 && blocks[0].kind == BlockKind::Text;
-        let flat = matches!(target, BlockKind::Title | BlockKind::Code { .. }) || target.is_multi();
+        let flat = matches!(target, BlockKind::Title | BlockKind::Code { .. }) || target.is_source() || target.is_multi();
         if inline || flat {
             let mut rich = if inline { blocks.remove(0).text } else { RichText::plain(blocks.iter().map(|b| b.plain_text()).collect::<Vec<_>>().join("\n")) };
-            if matches!(target, BlockKind::Code { .. }) {
+            if matches!(target, BlockKind::Code { .. }) || target.is_source() {
                 rich = RichText::plain(rich.text);
             }
             if target == BlockKind::Title {

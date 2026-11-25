@@ -40,6 +40,8 @@ pub struct LEdge {
     pub from: usize,
     pub to: usize,
     pub minlen: usize,
+    /// 边标签估算宽度（用于多跨层虚拟节点预留走廊，0 表示无标签）
+    pub label_w: f32,
 }
 
 pub struct Layout {
@@ -47,6 +49,10 @@ pub struct Layout {
     pub pos: Vec<Pt>,
     /// 每条边的折线（起点为源节点中心、终点为目标节点中心，中间为虚拟节点位置）
     pub edges: Vec<Vec<Pt>>,
+    /// 每个实节点所在的层号
+    pub node_layer: Vec<usize>,
+    /// 每一层沿主轴方向占用的坐标区间 `(min, max)`（与 `pos` 同坐标系），相邻区间之间即为无节点的空走廊
+    pub layer_spans: Vec<(f32, f32)>,
 }
 
 pub struct Spacing {
@@ -63,7 +69,7 @@ impl Default for Spacing {
 pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layout {
     let n = nodes.len();
     if n == 0 {
-        return Layout { pos: vec![], edges: edges.iter().map(|_| vec![]).collect() };
+        return Layout { pos: vec![], edges: edges.iter().map(|_| vec![]).collect(), node_layer: vec![], layer_spans: vec![] };
     }
     // 统一在「从上到下」的坐标系里计算；横向布局时交换宽高
     let size = |i: usize| -> (f32, f32) {
@@ -134,10 +140,15 @@ pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layou
     for &(u, v, _, k) in &dag {
         let mut chain = vec![u];
         let mut prev = u;
+        let span = layer[v].saturating_sub(layer[u]);
+        let mid_l = layer[u] + span / 2;
+        let lw = edges[k].label_w;
         for l in layer[u] + 1..layer[v] {
             let id = vs.len();
             let cl = if nodes[u].cluster == nodes[v].cluster { nodes[u].cluster } else { None };
-            vs.push(V { w: 8., h: 8., cluster: cl, layer: l });
+            // 多跨层带标签的边在中点层预留适度宽度，避免并行长边的标签互相挤压
+            let dw = if l == mid_l && lw > 0. { (lw * 0.65).clamp(18., 96.) } else { 14. };
+            vs.push(V { w: dw, h: 8., cluster: cl, layer: l });
             vadj_up.push(vec![]);
             vadj_down.push(vec![]);
             vadj_down[prev].push(id);
@@ -169,7 +180,7 @@ pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layou
         }
     }
 
-    // ── 4. 重心法减少交叉（同一子图的节点保持相邻）──
+    // ── 4. 重心法 + 相邻交换（transpose）减少交叉（同一子图的节点保持相邻）──
     let mut order_pos = vec![0f32; vs.len()];
     let refresh = |layers: &Vec<Vec<usize>>, order_pos: &mut Vec<f32>| {
         for l in layers {
@@ -179,8 +190,19 @@ pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layou
         }
     };
     refresh(&layers, &mut order_pos);
+    let mut is_back_dummy = vec![false; vs.len()];
+    for (&k, ch) in &chains {
+        if reversed[k] {
+            for &d in &ch[1..ch.len().saturating_sub(1)] {
+                is_back_dummy[d] = true;
+            }
+        }
+    }
+    let clusters: Vec<Option<usize>> = vs.iter().map(|v| v.cluster).collect();
+    transpose(&mut layers, &vadj_up, &vadj_down, &clusters, &is_back_dummy, vs.len());
+    refresh(&layers, &mut order_pos);
     let mut best = (crossings(&layers, &vadj_down, vs.len()), layers.clone());
-    for iter in 0..12 {
+    for iter in 0..24 {
         let down = iter % 2 == 0;
         let range: Vec<usize> = if down { (1..nlayers).collect() } else { (0..nlayers.saturating_sub(1)).rev().collect() };
         for li in range {
@@ -216,33 +238,52 @@ pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layou
                 order_pos[v] = i as f32;
             }
         }
+        transpose(&mut layers, &vadj_up, &vadj_down, &clusters, &is_back_dummy, vs.len());
+        refresh(&layers, &mut order_pos);
         let c = crossings(&layers, &vadj_down, vs.len());
         if c < best.0 {
             best = (c, layers.clone());
+            if c == 0 {
+                break;
+            }
         }
     }
-    let layers = best.1;
+    let mut layers = best.1;
+    // 最终再做一次同交叉数外推，把回边走廊稳稳留在最左/最右外缘
+    transpose(&mut layers, &vadj_up, &vadj_down, &clusters, &is_back_dummy, vs.len());
 
-    // ── 5. 坐标分配：Brandes-Köpf，父子尽量对齐在同一竖线上，长边保持笔直 ──
+    // ── 5. 坐标分配：Brandes-Köpf + 长边拉直 + 父子居中对齐 ──
     let gap = |a: usize, b: usize| -> f32 {
-        // 虚拟节点之间间距小一些；不同子图之间留更大空隙给子图边框
-        let half = |v: usize| if v >= n { 6. } else { sp.node / 2. };
+        // 虚拟节点之间保留清晰走廊；不同子图之间留更大空隙给子图边框
+        let half = |v: usize| if v >= n { 10. } else { sp.node / 2. };
         let extra = if vs[a].cluster != vs[b].cluster { 24. } else { 0. };
         (vs[a].w + vs[b].w) / 2. + half(a) + half(b) + extra
     };
     let widths: Vec<f32> = vs.iter().map(|v| v.w).collect();
-    let x = brandes_kopf(&layers, &vadj_up, &vadj_down, &widths, n, &gap);
-    // 层的纵坐标
+    let mut x = brandes_kopf(&layers, &vadj_up, &vadj_down, &widths, n, &gap);
+    straighten_and_center(&mut x, &layers, &chains, &reversed, &vadj_up, &vadj_down, n, &gap);
+    // 层的纵坐标与主轴跨度
     let mut ly = vec![0f32; nlayers];
+    let mut lh = vec![0f32; nlayers];
     let mut acc = 0.;
     for (li, l) in layers.iter().enumerate() {
         let h = l.iter().filter(|&&v| v < n).map(|&v| vs[v].h).fold(0., f32::max).max(8.);
+        lh[li] = h;
         ly[li] = acc + h / 2.;
         acc += h + sp.rank;
     }
     let minx = (0..vs.len()).map(|v| x[v] - vs[v].w / 2.).fold(f32::INFINITY, f32::min);
     let total_y = acc - sp.rank;
     let total_x = (0..vs.len()).map(|v| x[v] + vs[v].w / 2.).fold(f32::NEG_INFINITY, f32::max) - minx;
+    let layer_spans: Vec<(f32, f32)> = (0..nlayers)
+        .map(|li| {
+            let (a, b) = (ly[li] - lh[li] / 2., ly[li] + lh[li] / 2.);
+            match dir {
+                Dir::TB | Dir::LR => (a, b),
+                Dir::BT | Dir::RL => (total_y - b, total_y - a),
+            }
+        })
+        .collect();
     let place = |v: usize| -> Pt {
         let (px, py) = (x[v] - minx, ly[vs[v].layer]);
         match dir {
@@ -270,7 +311,7 @@ pub fn layout(nodes: &[LNode], edges: &[LEdge], dir: Dir, sp: &Spacing) -> Layou
         }
         out_edges.push(pts);
     }
-    Layout { pos, edges: out_edges }
+    Layout { pos, edges: out_edges, node_layer: layer, layer_spans }
 }
 
 /// 分层：网络单纯形（移植自 dagre `rank/network-simplex.js`，Gansner et al. "A Technique for Drawing
@@ -482,6 +523,147 @@ fn depth(mut v: usize, parent: &[usize]) -> usize {
     d
 }
 
+/// 相邻节点局部交换（transpose）：交换同层同子图的相邻两点以严格减少交叉；
+/// 交叉数相同时，把回边虚拟节点推向所在一侧的外缘，避免回边切入分支之间。
+fn transpose(layers: &mut [Vec<usize>], up: &[Vec<usize>], down: &[Vec<usize>], clusters: &[Option<usize>], is_back_dummy: &[bool], nv: usize) {
+    let mut pos = vec![0usize; nv];
+    for l in layers.iter() {
+        for (i, &v) in l.iter().enumerate() {
+            pos[v] = i;
+        }
+    }
+    let pair_cross = |a: usize, b: usize, adj: &[Vec<usize>], pos: &[usize]| -> usize {
+        let mut c = 0;
+        for &na in &adj[a] {
+            let pa = pos[na];
+            for &nb in &adj[b] {
+                if pa > pos[nb] {
+                    c += 1;
+                }
+            }
+        }
+        c
+    };
+    for _ in 0..8 {
+        let mut improved = false;
+        for l in layers.iter_mut() {
+            let len = l.len();
+            if len < 2 {
+                continue;
+            }
+            let mid = len / 2;
+            for i in 0..len - 1 {
+                let (a, b) = (l[i], l[i + 1]);
+                if clusters[a] != clusters[b] {
+                    continue;
+                }
+                let before = pair_cross(a, b, up, &pos) + pair_cross(a, b, down, &pos);
+                let after = pair_cross(b, a, up, &pos) + pair_cross(b, a, down, &pos);
+                let push_back_outer = after == before && ((i < mid && !is_back_dummy[a] && is_back_dummy[b]) || (i + 1 >= mid && is_back_dummy[a] && !is_back_dummy[b]));
+                if after < before || push_back_outer {
+                    l.swap(i, i + 1);
+                    pos[a] = i + 1;
+                    pos[b] = i;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// 后处理：1) 把跨多层长边的虚拟节点链尽量拉成笔直竖线；2) 在不破坏间距的前提下把实节点居中对齐到相邻节点。
+#[allow(clippy::too_many_arguments)]
+fn straighten_and_center(
+    x: &mut [f32],
+    layers: &[Vec<usize>],
+    chains: &HashMap<usize, Vec<usize>>,
+    reversed: &[bool],
+    up: &[Vec<usize>],
+    down: &[Vec<usize>],
+    n: usize,
+    gap: &dyn Fn(usize, usize) -> f32,
+) {
+    let nv = x.len();
+    let mut loc = vec![(0usize, 0usize); nv];
+    for (li, l) in layers.iter().enumerate() {
+        for (i, &v) in l.iter().enumerate() {
+            loc[v] = (li, i);
+        }
+    }
+    let bounds = |v: usize, x: &[f32]| -> (f32, f32) {
+        let (li, i) = loc[v];
+        let l = &layers[li];
+        let lo = if i > 0 { x[l[i - 1]] + gap(l[i - 1], v) } else { f32::NEG_INFINITY };
+        let hi = if i + 1 < l.len() { x[l[i + 1]] - gap(v, l[i + 1]) } else { f32::INFINITY };
+        (lo, hi)
+    };
+    let mut chain_keys: Vec<usize> = chains.keys().copied().collect();
+    chain_keys.sort_unstable();
+    for _ in 0..12 {
+        // 1. 拉直跨层虚拟节点链
+        for &k in &chain_keys {
+            let ch = &chains[&k];
+            if ch.len() < 3 {
+                continue;
+            }
+            let dummies = &ch[1..ch.len() - 1];
+            let mut lo_max = f32::NEG_INFINITY;
+            let mut hi_min = f32::INFINITY;
+            for &d in dummies {
+                let (lo, hi) = bounds(d, x);
+                lo_max = lo_max.max(lo);
+                hi_min = hi_min.min(hi);
+            }
+            if lo_max <= hi_min {
+                let target = if reversed[k] {
+                    // 回边保持在它所在的外侧通道，避免向中间切入穿过节点
+                    dummies.iter().map(|&d| x[d]).sum::<f32>() / dummies.len() as f32
+                } else {
+                    (x[ch[0]] + x[*ch.last().unwrap()]) * 0.5
+                };
+                let tx = target.clamp(lo_max, hi_min);
+                for &d in dummies {
+                    x[d] = tx;
+                }
+            } else {
+                // 无法全直时做受限拉普拉斯平滑，消除锯齿抖动
+                for _ in 0..4 {
+                    for j in 1..ch.len() - 1 {
+                        let d = ch[j];
+                        let (lo, hi) = bounds(d, x);
+                        if lo <= hi {
+                            x[d] = ((x[ch[j - 1]] + x[ch[j + 1]]) * 0.5).clamp(lo, hi);
+                        }
+                    }
+                }
+            }
+        }
+        // 2. 在走廊允许范围内把实节点向直接邻居重心平滑居中（先下后上，确保单链起终点严格对齐）
+        for pass in 0..2 {
+            let iter: Box<dyn Iterator<Item = usize>> = if pass == 0 { Box::new(0..n) } else { Box::new((0..n).rev()) };
+            for v in iter {
+                let (lo, hi) = bounds(v, x);
+                if lo > hi {
+                    continue;
+                }
+                let up_avg = (!up[v].is_empty()).then(|| up[v].iter().map(|&u| x[u]).sum::<f32>() / up[v].len() as f32);
+                let dn_avg = (!down[v].is_empty()).then(|| down[v].iter().map(|&w| x[w]).sum::<f32>() / down[v].len() as f32);
+                let (target, alpha) = match (up_avg, dn_avg) {
+                    (Some(a), Some(b)) => ((a + b) * 0.5, 0.7),
+                    (Some(a), None) => (a, if up[v].len() == 1 { 1.0 } else { 0.7 }),
+                    (None, Some(b)) => (b, if down[v].len() == 1 { 1.0 } else { 0.7 }),
+                    (None, None) => continue,
+                };
+                let next = (x[v] + (target - x[v]) * alpha).clamp(lo, hi);
+                x[v] = next;
+            }
+        }
+    }
+}
+
 /// 相邻两层之间的连线交叉数。
 fn crossings(layers: &[Vec<usize>], down: &[Vec<usize>], nv: usize) -> usize {
     let mut pos = vec![0usize; nv];
@@ -628,19 +810,26 @@ fn brandes_kopf(layers: &[Vec<usize>], up: &[Vec<usize>], down: &[Vec<usize>], w
             xss.push(x);
         }
     }
-    // 以总宽度最小的一种为基准对齐另外三种：靠左的对齐左边界，靠右的对齐右边界
-    let span = |xs: &[f32]| {
+    // 以总宽度最小的一种为基准对齐另外三种：靠左的对齐左边界，靠右的对齐右边界（含节点半宽）
+    let extent = |xs: &[f32]| -> (f32, f32) {
         let lo = (0..nv).map(|v| xs[v] - w[v] / 2.).fold(f32::INFINITY, f32::min);
         let hi = (0..nv).map(|v| xs[v] + w[v] / 2.).fold(f32::NEG_INFINITY, f32::max);
-        hi - lo
+        (lo, hi)
     };
-    let best = (0..4).min_by(|&a, &b| span(&xss[a]).partial_cmp(&span(&xss[b])).unwrap()).unwrap();
-    let (bmin, bmax) = (xss[best].iter().copied().fold(f32::INFINITY, f32::min), xss[best].iter().copied().fold(f32::NEG_INFINITY, f32::max));
+    let best = (0..4)
+        .min_by(|&a, &b| {
+            let (la, ha) = extent(&xss[a]);
+            let (lb, hb) = extent(&xss[b]);
+            (ha - la).partial_cmp(&(hb - lb)).unwrap()
+        })
+        .unwrap();
+    let (bmin, bmax) = extent(&xss[best]);
     for (k, xs) in xss.iter_mut().enumerate() {
         if k == best {
             continue;
         }
-        let d = if k % 2 == 0 { bmin - xs.iter().copied().fold(f32::INFINITY, f32::min) } else { bmax - xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) };
+        let (lo, hi) = extent(xs);
+        let d = if k % 2 == 0 { bmin - lo } else { bmax - hi };
         for v in xs.iter_mut() {
             *v += d;
         }
@@ -672,10 +861,10 @@ mod tests {
     fn layered_and_acyclic() {
         let nodes = vec![LNode { w: 80., h: 40., cluster: None }; 4];
         let edges = vec![
-            LEdge { from: 0, to: 1, minlen: 1 },
-            LEdge { from: 1, to: 2, minlen: 1 },
-            LEdge { from: 2, to: 0, minlen: 1 }, // 环
-            LEdge { from: 0, to: 3, minlen: 1 },
+            LEdge { from: 0, to: 1, minlen: 1, label_w: 0. },
+            LEdge { from: 1, to: 2, minlen: 1, label_w: 0. },
+            LEdge { from: 2, to: 0, minlen: 1, label_w: 0. }, // 环
+            LEdge { from: 0, to: 3, minlen: 1, label_w: 0. },
         ];
         let l = layout(&nodes, &edges, Dir::TB, &Spacing::default());
         assert!(l.pos[1].y > l.pos[0].y);
@@ -695,7 +884,7 @@ mod tests {
     #[test]
     fn hundred_nodes_fast() {
         let nodes = vec![LNode { w: 90., h: 40., cluster: None }; 100];
-        let edges: Vec<LEdge> = (1..100).map(|i| LEdge { from: (i - 1) / 3, to: i, minlen: 1 }).collect();
+        let edges: Vec<LEdge> = (1..100).map(|i| LEdge { from: (i - 1) / 3, to: i, minlen: 1, label_w: 0. }).collect();
         let t = std::time::Instant::now();
         let _ = layout(&nodes, &edges, Dir::LR, &Spacing::default());
         assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());

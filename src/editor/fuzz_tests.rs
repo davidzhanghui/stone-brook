@@ -998,3 +998,38 @@ fn code_block_long_line_scroll_immediate(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 往「文本绘图 / 公式 / HTML」源码块粘贴代码块片段时，应扁平化为纯文本写入当前源码槽，
+/// 不应在下方新建独立代码块。
+#[gpui::test]
+fn paste_fragment_into_diagram_stays_in_source_slot(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-diagram-paste-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("绘图粘贴测试")),
+        Block::new(BlockKind::Diagram { view: 2, offsets: Default::default() }, RichText::default()),
+    ]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "diagram-paste".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+
+    let src = "flowchart TD\n    A[\"开始\"] --> B[\"结束\"]";
+    win.update(&mut vcx, |ed, window, cx| {
+        window.focus(&ed.focus);
+        ed.set_cursor(Pos::new(1, 0, 0), false, cx);
+        // 模拟网页 HTML <pre><code> 或站内复制 Plain Text 代码块得到的片段
+        let code_blk = Block::new(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, RichText::plain(src));
+        ed.insert_fragment(vec![code_blk], cx);
+        assert_eq!(ed.content.blocks.len(), 2, "不应在文本绘图块下方新建代码块");
+        assert!(matches!(ed.content.blocks[1].kind, BlockKind::Diagram { .. }));
+        assert_eq!(ed.content.blocks[1].text.text, src);
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
