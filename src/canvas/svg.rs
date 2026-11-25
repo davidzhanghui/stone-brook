@@ -164,10 +164,28 @@ pub fn to_svg(scene: &Scene) -> String {
     if let Some(bg) = scene.bg {
         writeln!(out, "<rect width=\"100%\" height=\"100%\"{}/>", color_attr("fill", Some(bg))).ok();
     }
-    for item in &scene.items {
+    let mut i = 0;
+    while i < scene.items.len() {
+        if matches!(scene.items[i], Item::Line(_)) {
+            let start = i;
+            while i < scene.items.len() && matches!(scene.items[i], Item::Line(_)) {
+                if let Item::Line(l) = &scene.items[i] {
+                    line_svg_stroke(&mut out, l, scene.rough);
+                }
+                i += 1;
+            }
+            for item in &scene.items[start..i] {
+                if let Item::Line(l) = item {
+                    line_svg_labels(&mut out, l);
+                }
+            }
+            continue;
+        }
+        let item = &scene.items[i];
+        i += 1;
         match item {
             Item::Shape(s) => shape_svg(&mut out, s, scene.rough),
-            Item::Line(l) => line_svg(&mut out, l, scene.rough),
+            Item::Line(_) => {}
             Item::Text(t) => text_el(&mut out, std::slice::from_ref(&t.text), t.pos.x, t.pos.y - t.size * 0.35, t.size, t.color, t.bold, t.anchor),
             Item::Path(p) => path_el(&mut out, &p.cmds, p.fill, p.stroke, p.width, p.dash.then_some(5.)),
             Item::Icon(i) => {
@@ -294,7 +312,7 @@ fn shape_svg(out: &mut String, s: &ShapeItem, rough: bool) {
     }
 }
 
-fn line_svg(out: &mut String, l: &LineItem, rough: bool) {
+fn line_svg_stroke(out: &mut String, l: &LineItem, rough: bool) {
     if l.points.len() < 2 {
         return;
     }
@@ -325,19 +343,25 @@ fn line_svg(out: &mut String, l: &LineItem, rough: bool) {
             }
         }
     }
+}
+
+fn line_svg_labels(out: &mut String, l: &LineItem) {
+    if l.points.len() < 2 {
+        return;
+    }
     if !l.label.is_empty() {
-        let m = polyline_mid(&l.points);
+        let m = l.label_pos.unwrap_or_else(|| if l.curved || l.corner_radius > 0. { cmds_point_at(&line_cmds(l), 0.5) } else { polyline_mid(&l.points) });
         let w = estimate_width(&l.label, l.font_size, false);
         let lines: Vec<String> = l.label.split('\n').map(|s| s.to_string()).collect();
         if let Some(bg) = l.label_bg {
             let h = l.font_size * 1.3 * lines.len() as f32;
             writeln!(
                 out,
-                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"3\"{}/>",
-                m.x - w / 2. - 3.,
-                m.y - h / 2.,
-                w + 6.,
-                h,
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4\"{}/>",
+                m.x - w / 2. - 4.,
+                m.y - h / 2. - 1.,
+                w + 8.,
+                h + 2.,
                 color_attr("fill", Some(bg))
             )
             .ok();

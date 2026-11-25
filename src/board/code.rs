@@ -328,6 +328,8 @@ pub fn explode_scene(scene: &Scene, dark: bool) -> BoardDoc {
                 }
                 let route = if l.curved && (l.points.len() > 2 || l.tangents.is_some()) {
                     Route::Curve
+                } else if l.corner_radius > 0. {
+                    Route::RoundElbow
                 } else if l.points.len() == 2 {
                     Route::Straight
                 } else if ortho {
@@ -367,7 +369,7 @@ pub fn explode_scene(scene: &Scene, dark: bool) -> BoardDoc {
     d
 }
 
-/// 「画板样式」的流程图配色：步骤浅蓝、判断浅橙、起止灰色，连线灰色曲线。
+/// 「画板样式」的流程图配色：步骤浅蓝、判断浅橙、起止灰色，连线灰色 90° 圆角折线。
 /// 源码里用 style / classDef 指定过颜色的节点保持原样。
 fn board_flow_style(d: &mut BoardDoc) {
     let default_fill = Some(Col::rgb(0xeef3ff));
@@ -387,8 +389,11 @@ fn board_flow_style(d: &mut BoardDoc) {
                 el.fill = Some(Col::rgb(fill));
                 el.stroke = Col::rgb(stroke);
             }
-            ElKind::Connector { ref mut route, .. } => {
-                *route = Route::Curve;
+            ElKind::Connector { ref mut route, ref a, ref b, .. } => {
+                let self_loop = matches!((a, b), (End::Bound { el: x, .. }, End::Bound { el: y, .. }) if x == y);
+                if !self_loop {
+                    *route = Route::RoundElbow;
+                }
                 el.stroke = Col::rgb(0x8f959e);
                 el.stroke_w = 1.5;
                 el.font_size = 12.;
@@ -470,6 +475,23 @@ pub fn code_to_board(src: &str, lang: CodeLang, classic: bool, dark: bool) -> Re
             _ => Ok(explode_scene(&render_with(src, "board")?, dark)),
         },
     }
+}
+
+/// 将 Mermaid 源码直接构建成带「代码分区」元数据的画板文档（画板样式），
+/// 插入文档后既可直接预览与拖动元素，也可在画板里二次编辑 Mermaid 源码与切换样式。
+pub fn mermaid_board(src: &str, dark: bool) -> Result<BoardDoc, String> {
+    let mut tmp = code_to_board(src, CodeLang::Mermaid, false, dark)?;
+    if let Some(b) = tmp.bounds() {
+        let mut sec = tmp.new_el(ElKind::Section, b.inflate(12.), dark);
+        sec.text.clear();
+        sec.fill = None;
+        sec.no_stroke = true;
+        sec.code = Some(src.to_string());
+        sec.code_lang = CodeLang::Mermaid.to_u8();
+        sec.code_classic = false;
+        tmp.els.insert(0, sec);
+    }
+    Ok(tmp)
 }
 
 /// PlantUML 画板样式（测试用）。

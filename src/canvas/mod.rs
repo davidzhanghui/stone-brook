@@ -444,6 +444,12 @@ pub struct LineItem {
     pub seed: u64,
     /// 曲线两端的出线方向（各自朝外，单位向量）：设置后曲线从端点沿此方向伸出，箭头也按它定方向
     pub tangents: Option<(Pt, Pt)>,
+    /// 为 true 且 `curved` 为 true 时，多段路径改用无过冲均匀三次 B 样条（类似 Mermaid / D3 curveBasis）
+    pub basis: bool,
+    /// 非曲线折线的拐角圆角半径（> 0 时画出 90°/折线圆角）
+    pub corner_radius: f32,
+    /// 自定义标签位置（为空时自动取曲线/折线中点）
+    pub label_pos: Option<Pt>,
 }
 
 impl LineItem {
@@ -474,6 +480,9 @@ impl LineItem {
             font_size: 12.,
             seed: 1,
             tangents: None,
+            basis: false,
+            corner_radius: 0.,
+            label_pos: None,
         }
     }
 }
@@ -541,7 +550,16 @@ impl Item {
     pub fn bounds(&self) -> Rect {
         match self {
             Item::Shape(s) => s.rect,
-            Item::Line(l) => geom::points_bounds(&l.points).inflate(l.font_size.max(8.)),
+            Item::Line(l) => {
+                let mut b = geom::points_bounds(&l.points).inflate(l.font_size.max(8.));
+                if !l.label.is_empty() {
+                    let m = l.label_pos.unwrap_or_else(|| geom::polyline_mid(&l.points));
+                    let lw = geom::estimate_width(&l.label, l.font_size, false) + 12.;
+                    let lh = l.font_size * 1.4 * l.label.lines().count().max(1) as f32 + 6.;
+                    b = b.union(&rect(m.x - lw / 2., m.y - lh / 2., lw, lh));
+                }
+                b
+            }
             Item::Text(t) => {
                 let w = geom::estimate_width(&t.text, t.size, t.bold);
                 let x = match t.anchor {

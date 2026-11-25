@@ -598,6 +598,7 @@ impl BoardEditor {
                             cx.emit(BoardEvent::Insert);
                         })))
                     })
+                    .when(!self.preview, |d| d.child(text_btn("tb-cancel", "取消", false).on_click(cx.listener(|this, _, _, cx| this.request_cancel(cx)))))
                     .child(
                         div()
                             .id("tb-done")
@@ -628,6 +629,99 @@ impl BoardEditor {
             self.pop_at = at;
         }
         cx.notify();
+    }
+
+    /// 点击「取消」且存在未保存改动时的防误触确认弹窗。
+    pub(super) fn render_cancel_confirm(&self, t: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.cancel_confirm {
+            return None;
+        }
+        let title = if self.created_blank { "放弃新建画板？" } else { "放弃本次修改？" };
+        let desc = if self.created_blank {
+            "当前画板内容不会被保存，文档中的画板块也将一并移除。"
+        } else {
+            "画板将恢复到进入编辑前的状态，本次所做的修改会丢失。"
+        };
+        Some(
+            div()
+                .id("board-cancel-backdrop")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::black().opacity(0.35))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.cancel_confirm = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .id("board-cancel-card")
+                        .w(px(348.))
+                        .p(px(20.))
+                        .rounded(px(12.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(t.text).child(title))
+                        .child(div().text_size(px(13.)).text_color(t.text_secondary).child(desc))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_end()
+                                .gap(px(8.))
+                                .pt(px(4.))
+                                .child(
+                                    div()
+                                        .id("board-cancel-stay")
+                                        .h(px(30.))
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(7.))
+                                        .cursor_pointer()
+                                        .border_1()
+                                        .border_color(t.border)
+                                        .text_size(px(13.))
+                                        .text_color(t.text)
+                                        .hover(|s| s.bg(t.hover))
+                                        .child("继续编辑")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_confirm = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("board-cancel-discard")
+                                        .h(px(30.))
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(7.))
+                                        .cursor_pointer()
+                                        .bg(t.fg_palette[1])
+                                        .text_size(px(13.))
+                                        .text_color(gpui::white())
+                                        .hover(|s| s.opacity(0.9))
+                                        .child("放弃")
+                                        .on_click(cx.listener(|this, _, _, cx| this.confirm_cancel(cx))),
+                                ),
+                        ),
+                ),
+        )
     }
 
     /// 底部画笔栏：画笔 / 荧光笔 / 橡皮擦、颜色、粗细（手绘工具栏）。

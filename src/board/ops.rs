@@ -566,7 +566,9 @@ impl BoardEditor {
 
     pub(super) fn escape(&mut self, _: &BEscape, window: &mut Window, cx: &mut Context<Self>) {
         // 依次收起最上层的东西，收起一样就结束
-        if self.close_overlays() || self.templates.take().is_some() {
+        if self.cancel_confirm {
+            self.cancel_confirm = false;
+        } else if self.close_overlays() || self.templates.take().is_some() {
         } else if self.quick_visible() {
             self.quick_tpl = false;
             self.quick_pick = None;

@@ -356,6 +356,10 @@ pub(super) struct Picker {
 
 pub enum BoardEvent {
     Close,
+    /// 取消编辑：若为新建空画板（`remove_embed = true`），工作区同时删除文档里的空画板块和对象
+    Cancel {
+        remove_embed: bool,
+    },
     /// 预览画板（以思维导图查看文档）：插入到文档光标处
     Insert,
 }
@@ -365,6 +369,12 @@ impl EventEmitter<BoardEvent> for BoardEditor {}
 pub struct BoardEditor {
     pub obj_id: String,
     pub(super) doc: BoardDoc,
+    /// 进入画板时的初始快照（用于「取消」回滚与脏检测）
+    pub(super) initial_doc: BoardDoc,
+    /// 打开时原本为空画板（取消时一并清理文档中的空画板块）
+    pub(super) created_blank: bool,
+    /// 是否正在展示「放弃修改」确认弹层
+    pub(super) cancel_confirm: bool,
     pub(super) undo: std::collections::VecDeque<BoardDoc>,
     pub(super) redo: Vec<BoardDoc>,
     pub(super) offset: Pt,
@@ -473,11 +483,15 @@ impl Focusable for BoardEditor {
 impl BoardEditor {
     pub fn new(obj_id: String, cx: &mut Context<Self>) -> Self {
         let doc = crate::objects::board(&obj_id).map(|b| (*b).clone()).unwrap_or_else(|| BoardDoc::new(false));
+        let initial_doc = doc.clone();
         let flow = doc.flow;
         let blank = doc.els.is_empty();
         BoardEditor {
             obj_id,
             doc,
+            initial_doc,
+            created_blank: blank,
+            cancel_confirm: false,
             undo: Default::default(),
             redo: vec![],
             offset: pt(0., 0.),
@@ -574,6 +588,55 @@ impl BoardEditor {
         self.finish_edit(cx);
         self.commit(cx);
         cx.emit(BoardEvent::Close);
+    }
+
+    /// 与进入画板时的快照相比是否有未保存改动。
+    pub fn is_dirty(&self) -> bool {
+        if self.doc.els.len() != self.initial_doc.els.len() || self.doc.rough != self.initial_doc.rough || self.doc.flow != self.initial_doc.flow {
+            return true;
+        }
+        serde_json::to_string(&self.doc).ok() != serde_json::to_string(&self.initial_doc).ok()
+    }
+
+    /// 点击「取消」：无改动直接退出；有改动时弹出防误触确认框。
+    pub fn request_cancel(&mut self, cx: &mut Context<Self>) {
+        self.finish_edit(cx);
+        self.close_overlays();
+        if self.preview {
+            cx.emit(BoardEvent::Close);
+            return;
+        }
+        if self.is_dirty() {
+            self.cancel_confirm = true;
+            cx.notify();
+        } else {
+            self.confirm_cancel(cx);
+        }
+    }
+
+    /// 确认放弃修改：新建空画板通知工作区移除嵌入块，已有画板将对象库回滚至进入前快照。
+    pub fn confirm_cancel(&mut self, cx: &mut Context<Self>) {
+        self.cancel_confirm = false;
+        self.doc = self.initial_doc.clone();
+        if self.created_blank {
+            cx.emit(BoardEvent::Cancel { remove_embed: true });
+        } else {
+            crate::objects::update(&self.obj_id, crate::objects::ObjData::Board(Arc::new(self.initial_doc.clone())));
+            cx.emit(BoardEvent::Cancel { remove_embed: false });
+        }
+    }
+
+    #[cfg(test)]
+    pub fn cancel_confirm_open(&self) -> bool {
+        self.cancel_confirm
+    }
+
+    #[cfg(test)]
+    pub fn add_test_shape_and_commit(&mut self, text: &str, cx: &mut Context<Self>) {
+        let mut el = self.doc.new_el(ElKind::Shape(ShapeKind::RoundRect), crate::canvas::rect(120., 0., 100., 50.), false);
+        el.text = text.into();
+        self.doc.els.push(el);
+        self.commit(cx);
     }
 
     /// 收起所有浮层（工具栏面板、下拉、右键菜单、图形选择器）。
@@ -1511,5 +1574,6 @@ impl Render for BoardEditor {
             .children(self.render_quick_templates(&t, cx))
             .children(self.render_templates(&t, cx))
             .children(self.render_code_dlg(&t, window, cx))
+            .children(self.render_cancel_confirm(&t, cx))
     }
 }

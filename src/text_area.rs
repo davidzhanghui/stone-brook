@@ -16,23 +16,36 @@ actions!(
         TBackspace,
         TDelete,
         TWordBack,
+        TDeleteLineBack,
         TLeft,
         TRight,
         TUp,
         TDown,
+        TWordLeft,
+        TWordRight,
         TSelectLeft,
         TSelectRight,
         TSelectUp,
         TSelectDown,
+        TSelectWordLeft,
+        TSelectWordRight,
         THome,
         TEnd,
+        TSelectHome,
+        TSelectEnd,
+        TDocStart,
+        TDocEnd,
+        TSelectDocStart,
+        TSelectDocEnd,
         TSelectAll,
         TNewline,
         TCommit,
         TTab,
         TCopy,
         TCut,
-        TPaste
+        TPaste,
+        TUndo,
+        TRedo
     ]
 );
 
@@ -40,20 +53,44 @@ pub fn bind_keys(cx: &mut App) {
     let c = Some("TextArea");
     cx.bind_keys([
         KeyBinding::new("backspace", TBackspace, c),
+        KeyBinding::new("shift-backspace", TBackspace, c),
+        KeyBinding::new("ctrl-h", TBackspace, c),
         KeyBinding::new("delete", TDelete, c),
+        KeyBinding::new("ctrl-d", TDelete, c),
         KeyBinding::new("alt-backspace", TWordBack, c),
+        KeyBinding::new("cmd-backspace", TDeleteLineBack, c),
         KeyBinding::new("left", TLeft, c),
         KeyBinding::new("right", TRight, c),
         KeyBinding::new("up", TUp, c),
         KeyBinding::new("down", TDown, c),
+        KeyBinding::new("ctrl-b", TLeft, c),
+        KeyBinding::new("ctrl-f", TRight, c),
+        KeyBinding::new("ctrl-p", TUp, c),
+        KeyBinding::new("ctrl-n", TDown, c),
+        KeyBinding::new("alt-left", TWordLeft, c),
+        KeyBinding::new("alt-right", TWordRight, c),
         KeyBinding::new("shift-left", TSelectLeft, c),
         KeyBinding::new("shift-right", TSelectRight, c),
         KeyBinding::new("shift-up", TSelectUp, c),
         KeyBinding::new("shift-down", TSelectDown, c),
+        KeyBinding::new("alt-shift-left", TSelectWordLeft, c),
+        KeyBinding::new("alt-shift-right", TSelectWordRight, c),
         KeyBinding::new("cmd-left", THome, c),
         KeyBinding::new("cmd-right", TEnd, c),
+        KeyBinding::new("ctrl-a", THome, c),
+        KeyBinding::new("ctrl-e", TEnd, c),
         KeyBinding::new("home", THome, c),
         KeyBinding::new("end", TEnd, c),
+        KeyBinding::new("cmd-shift-left", TSelectHome, c),
+        KeyBinding::new("cmd-shift-right", TSelectEnd, c),
+        KeyBinding::new("ctrl-shift-a", TSelectHome, c),
+        KeyBinding::new("ctrl-shift-e", TSelectEnd, c),
+        KeyBinding::new("shift-home", TSelectHome, c),
+        KeyBinding::new("shift-end", TSelectEnd, c),
+        KeyBinding::new("cmd-up", TDocStart, c),
+        KeyBinding::new("cmd-down", TDocEnd, c),
+        KeyBinding::new("cmd-shift-up", TSelectDocStart, c),
+        KeyBinding::new("cmd-shift-down", TSelectDocEnd, c),
         KeyBinding::new("cmd-a", TSelectAll, c),
         // 画板：回车 / ⇧回车都是换行，Esc 或 ⌘回车结束编辑
         KeyBinding::new("enter", TNewline, c),
@@ -64,6 +101,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", TCopy, c),
         KeyBinding::new("cmd-x", TCut, c),
         KeyBinding::new("cmd-v", TPaste, c),
+        KeyBinding::new("cmd-z", TUndo, c),
+        KeyBinding::new("cmd-shift-z", TRedo, c),
+        KeyBinding::new("cmd-y", TRedo, c),
     ]);
 }
 
@@ -191,6 +231,9 @@ pub struct TextArea {
     code: Option<&'static str>,
     /// 字体（默认 PingFang SC；草图用手写体）
     font: Option<&'static str>,
+    /// 本地撤销 / 重做栈（避免编辑代码时按 ⌘Z 冒泡到外层画板）
+    undo: Vec<(String, Range<usize>, bool, Vec<crate::canvas::Span>)>,
+    redo: Vec<(String, Range<usize>, bool, Vec<crate::canvas::Span>)>,
 }
 
 impl TextArea {
@@ -227,6 +270,8 @@ impl TextArea {
             revealed: 0..0,
             code: None,
             font: None,
+            undo: vec![],
+            redo: vec![],
         }
     }
 
@@ -271,8 +316,20 @@ impl TextArea {
         self.changed(cx);
     }
 
+    /// 记录一次撤销快照（最多保留 100 步）。
+    fn push_undo(&mut self) {
+        if self.undo.len() >= 100 {
+            self.undo.remove(0);
+        }
+        self.undo.push((self.content.clone(), self.selected.clone(), self.reversed, self.spans.clone()));
+        self.redo.clear();
+    }
+
     /// 替换一段文字，样式分段随之移动；新文字继承前一个字的样式。
     fn splice(&mut self, range: Range<usize>, new: &str) {
+        if !range.is_empty() || !new.is_empty() {
+            self.push_undo();
+        }
         let old_len = self.content.len();
         if !self.spans.is_empty() {
             let fmt = crate::canvas::rich::fmt_at(&self.spans, old_len, range.start, self.base_fmt());
@@ -377,6 +434,26 @@ impl TextArea {
         self.layout.index_for(point(x, y))
     }
 
+    fn prev_word_boundary(&self, o: usize) -> usize {
+        if o == 0 {
+            return 0;
+        }
+        crate::words::segments(&self.content).into_iter().rev().find_map(|(i, w)| (i < o && w.chars().any(|c| c.is_alphanumeric())).then_some(i)).unwrap_or(0)
+    }
+
+    fn next_word_boundary(&self, o: usize) -> usize {
+        if o >= self.content.len() {
+            return self.content.len();
+        }
+        crate::words::segments(&self.content)
+            .into_iter()
+            .find_map(|(i, w)| {
+                let end = i + w.len();
+                (end > o && w.chars().any(|c| c.is_alphanumeric())).then_some(end)
+            })
+            .unwrap_or(self.content.len())
+    }
+
     fn para_bounds(&self, o: usize) -> (usize, usize) {
         let start = self.content[..o].rfind('\n').map(|i| i + 1).unwrap_or(0);
         let end = self.content[o..].find('\n').map(|i| o + i).unwrap_or(self.content.len());
@@ -396,17 +473,31 @@ impl TextArea {
     fn up(&mut self, _: &TUp, _: &mut Window, cx: &mut Context<Self>) {
         let o = self.vertical(-1.);
         self.selected = o..o;
+        self.reversed = false;
         cx.notify();
     }
     fn down(&mut self, _: &TDown, _: &mut Window, cx: &mut Context<Self>) {
         let o = self.vertical(1.);
         self.selected = o..o;
+        self.reversed = false;
         cx.notify();
     }
+    fn word_left(&mut self, _: &TWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let o = self.prev_word_boundary(self.cursor());
+        self.goal_x = None;
+        self.move_to(o, cx)
+    }
+    fn word_right(&mut self, _: &TWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let o = self.next_word_boundary(self.cursor());
+        self.goal_x = None;
+        self.move_to(o, cx)
+    }
     fn select_left(&mut self, _: &TSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.select_to(self.prev_boundary(self.cursor()), cx)
     }
     fn select_right(&mut self, _: &TSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.select_to(self.next_boundary(self.cursor()), cx)
     }
     fn select_up(&mut self, _: &TSelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -417,17 +508,54 @@ impl TextArea {
         let o = self.vertical(1.);
         self.select_to(o, cx)
     }
+    fn select_word_left(&mut self, _: &TSelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(self.prev_word_boundary(self.cursor()), cx)
+    }
+    fn select_word_right(&mut self, _: &TSelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(self.next_word_boundary(self.cursor()), cx)
+    }
     fn home(&mut self, _: &THome, _: &mut Window, cx: &mut Context<Self>) {
         let o = self.para_bounds(self.cursor()).0;
+        self.goal_x = None;
         self.move_to(o, cx)
     }
     fn end(&mut self, _: &TEnd, _: &mut Window, cx: &mut Context<Self>) {
         let o = self.para_bounds(self.cursor()).1;
+        self.goal_x = None;
         self.move_to(o, cx)
+    }
+    fn select_home(&mut self, _: &TSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        let o = self.para_bounds(self.cursor()).0;
+        self.goal_x = None;
+        self.select_to(o, cx)
+    }
+    fn select_end(&mut self, _: &TSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let o = self.para_bounds(self.cursor()).1;
+        self.goal_x = None;
+        self.select_to(o, cx)
+    }
+    fn doc_start(&mut self, _: &TDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.move_to(0, cx)
+    }
+    fn doc_end(&mut self, _: &TDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.move_to(self.content.len(), cx)
+    }
+    fn select_doc_start(&mut self, _: &TSelectDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(0, cx)
+    }
+    fn select_doc_end(&mut self, _: &TSelectDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(self.content.len(), cx)
     }
     fn select_all(&mut self, _: &TSelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selected = 0..self.content.len();
         self.reversed = false;
+        self.goal_x = None;
         cx.notify()
     }
     fn backspace(&mut self, _: &TBackspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -444,12 +572,37 @@ impl TextArea {
     }
     fn word_back(&mut self, _: &TWordBack, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_empty() {
-            let c = self.cursor();
-            let start =
-                self.content.split_word_bound_indices().rev().find_map(|(i, w)| (i < c && w.chars().any(|ch| ch.is_alphanumeric())).then_some(i)).unwrap_or(0);
+            let start = self.prev_word_boundary(self.cursor());
             self.select_to(start, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
+    }
+    fn delete_line_back(&mut self, _: &TDeleteLineBack, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            let start = self.para_bounds(self.cursor()).0;
+            self.select_to(start, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+    fn undo(&mut self, _: &TUndo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((content, selected, reversed, spans)) = self.undo.pop() else { return };
+        self.redo.push((self.content.clone(), self.selected.clone(), self.reversed, self.spans.clone()));
+        self.content = content;
+        self.selected = selected;
+        self.reversed = reversed;
+        self.spans = spans;
+        self.marked = None;
+        self.changed(cx);
+    }
+    fn redo(&mut self, _: &TRedo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((content, selected, reversed, spans)) = self.redo.pop() else { return };
+        self.undo.push((self.content.clone(), self.selected.clone(), self.reversed, self.spans.clone()));
+        self.content = content;
+        self.selected = selected;
+        self.reversed = reversed;
+        self.spans = spans;
+        self.marked = None;
+        self.changed(cx);
     }
     fn newline(&mut self, _: &TNewline, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "\n", window, cx)
@@ -485,11 +638,17 @@ impl TextArea {
         cx.stop_propagation();
         window.focus(&self.focus);
         let ix = self.layout.index_for(ev.position);
-        if ev.click_count >= 3 {
+        if ev.click_count >= 4 {
             self.selected = 0..self.content.len();
+            self.reversed = false;
+        } else if ev.click_count == 3 {
+            let (s, e) = self.para_bounds(ix);
+            self.selected = s..e;
+            self.reversed = false;
         } else if ev.click_count == 2 {
             let (s, e) = self.word_at(ix);
             self.selected = s..e;
+            self.reversed = false;
         } else if ev.modifiers.shift {
             self.select_to(ix, cx);
         } else {
@@ -501,7 +660,7 @@ impl TextArea {
     }
 
     fn word_at(&self, ix: usize) -> (usize, usize) {
-        for (i, w) in self.content.split_word_bound_indices() {
+        for (i, w) in crate::words::segments(&self.content) {
             if ix >= i && ix <= i + w.len() && w.chars().any(|c| !c.is_whitespace()) {
                 return (i, i + w.len());
             }
@@ -907,16 +1066,27 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::word_back))
+            .on_action(cx.listener(Self::delete_line_back))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::doc_start))
+            .on_action(cx.listener(Self::doc_end))
+            .on_action(cx.listener(Self::select_doc_start))
+            .on_action(cx.listener(Self::select_doc_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::commit))
@@ -924,6 +1094,8 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                 if this.scrollable && this.scroll_max > px(0.) {
                     let dy = ev.delta.pixel_delta(this.layout.line_h).y;
@@ -942,11 +1114,58 @@ impl Render for TextArea {
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_str_range;
+    use super::{
+        clamp_str_range, TDeleteLineBack, TDocStart, TRedo, TSelectDocEnd, TSelectEnd, TSelectHome, TSelectWordLeft, TUndo, TWordRight, TextArea, TextStyle,
+    };
 
     #[test]
     fn clamp_keeps_char_boundaries_for_multiline() {
         let s = "第一行\n第二行";
         assert_eq!(clamp_str_range(s, 1..100), 0..s.len());
+    }
+
+    #[gpui::test]
+    fn selection_navigation_and_undo_shortcuts(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+        let style = TextStyle { font_size: 13., line_height: 20., color: gpui::black(), bold: false, align: 0, v_align: 0, deco: 0 };
+        let win = cx.add_window(|_, cx| TextArea::new("flowchart TD\n    A --> B\n    B --> C", "", style, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+        vcx.run_until_parked();
+
+        win.update(&mut vcx, |ta, w, cx| {
+            // 跳到文首、选到行尾
+            ta.doc_start(&TDocStart, w, cx);
+            assert_eq!(ta.selection(), 0..0);
+            ta.select_end(&TSelectEnd, w, cx);
+            assert_eq!(&ta.text()[ta.selection()], "flowchart TD");
+
+            // 按词右移、按词左选
+            ta.doc_start(&TDocStart, w, cx);
+            ta.word_right(&TWordRight, w, cx);
+            assert_eq!(ta.selection(), 9..9); // "flowchart" 末尾
+            ta.select_word_left(&TSelectWordLeft, w, cx);
+            assert_eq!(&ta.text()[ta.selection()], "flowchart");
+
+            // 跳到第二行行尾，Cmd+Shift+Left 选到行首
+            let line2_end = ta.text().find("--> B").unwrap() + "--> B".len();
+            ta.move_to(line2_end, cx);
+            ta.select_home(&TSelectHome, w, cx);
+            assert_eq!(&ta.text()[ta.selection()], "    A --> B");
+
+            // Cmd+Shift+Down 选到文尾
+            ta.move_to(line2_end, cx);
+            ta.select_doc_end(&TSelectDocEnd, w, cx);
+            assert_eq!(&ta.text()[ta.selection()], "\n    B --> C");
+
+            // Cmd+Backspace 删到行首 + Cmd+Z 撤销 + Cmd+Shift+Z 重做
+            ta.move_to(line2_end, cx);
+            ta.delete_line_back(&TDeleteLineBack, w, cx);
+            assert!(!ta.text().contains("A --> B"));
+            ta.undo(&TUndo, w, cx);
+            assert!(ta.text().contains("A --> B"));
+            ta.redo(&TRedo, w, cx);
+            assert!(!ta.text().contains("A --> B"));
+        })
+        .unwrap();
     }
 }

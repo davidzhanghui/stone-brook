@@ -39,7 +39,6 @@ pub const LANGS: &[&str] = &[
     "HTTP",
     "Kotlin",
     "Swift",
-    "Mermaid",
     "LaTeX",
 ];
 

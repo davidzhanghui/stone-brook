@@ -397,6 +397,8 @@ pub struct Popups {
     pub tl_menu: Option<timeline::TlMenu>,
     /// 斜杠菜单里 hover「表格」时右侧弹出的行列选择器
     pub table_picker: Option<TablePicker>,
+    /// 打开了「视图」下拉菜单的绘图块
+    pub diagram_view_menu: Option<usize>,
     /// 打开了「配色」下拉菜单的绘图块
     pub diagram_theme_menu: Option<usize>,
     pub sync_menu: bool,
@@ -662,6 +664,7 @@ impl Editor {
         self.pop.ordered_menu = None;
         self.pop.mention = None;
         self.pop.link_edit = None;
+        self.pop.diagram_view_menu = None;
         self.pop.diagram_theme_menu = None;
         self.pop.table_picker = None;
         self.refresh_comments();
@@ -1171,6 +1174,26 @@ impl Editor {
     pub fn insert_embed(&mut self, kind: &str, id: &str, cx: &mut Context<Self>) {
         let b = Block::new(crate::model::BlockKind::Embed { kind: kind.into(), id: id.into() }, crate::model::RichText::default());
         self.insert_blocks_after_cursor(vec![b], cx);
+    }
+
+    /// 移除文档中指定对象 id 的嵌入块（例如新建画板取消时自动清理空画板占位块）。
+    pub fn remove_embed_by_id(&mut self, oid: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.content.blocks.iter().position(|b| matches!(&b.kind, crate::model::BlockKind::Embed { id, .. } if id == oid)) else {
+            return;
+        };
+        self.checkpoint(EditKind::Other);
+        if self.content.blocks.len() <= 2 && ix == 1 {
+            let b = self.block_mut(ix);
+            b.kind = crate::model::BlockKind::Text;
+            b.text = crate::model::RichText::default();
+            self.core.head = Pos::new(ix, 0, 0);
+        } else {
+            self.remove_blocks(ix..ix + 1);
+            let target = ix.saturating_sub(1).max(1).min(self.content.blocks.len() - 1);
+            self.core.head = self.slot_end(target);
+        }
+        self.core.anchor = self.core.head;
+        self.changed(cx);
     }
 
     /// 字号 / 页宽变化后重新排版（保留滚动位置）。

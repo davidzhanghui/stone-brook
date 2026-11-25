@@ -271,7 +271,26 @@ impl Workspace {
         }
         use crate::objects::ObjKind;
         match ObjKind::parse(kind) {
-            Some(ObjKind::Board | ObjKind::Flow) => self.mount_embed::<crate::board::view::BoardEditor>(id, window, cx),
+            Some(ObjKind::Board | ObjKind::Flow) => {
+                let oid = id.to_string();
+                let v = cx.new(|cx| crate::board::view::BoardEditor::new(oid.clone(), cx));
+                let sub = cx.subscribe_in(&v, window, move |this, _, ev: &crate::board::view::BoardEvent, window, cx| {
+                    use crate::board::view::BoardEvent;
+                    match ev {
+                        BoardEvent::Close | BoardEvent::Insert => this.close_embed(window, cx),
+                        BoardEvent::Cancel { remove_embed } => {
+                            if *remove_embed {
+                                this.editor.update(cx, |e, cx| e.remove_embed_by_id(&oid, cx));
+                                crate::objects::remove(&oid);
+                            }
+                            this.close_embed(window, cx);
+                        }
+                    }
+                });
+                let fh = v.focus_handle(cx);
+                window.focus(&fh);
+                self.embed = Some((v.into(), fh, sub));
+            }
             Some(ObjKind::Sketch) => self.mount_embed::<crate::sketch::view::SketchEditor>(id, window, cx),
             Some(ObjKind::Sheet) => self.mount_embed::<crate::sheet::SheetEditor>(id, window, cx),
             Some(ObjKind::Base) => self.mount_embed::<crate::base::editor::BaseEditor>(id, window, cx),
@@ -308,7 +327,7 @@ impl Workspace {
         let sub = cx.subscribe_in(&v, window, move |this, _, ev: &crate::board::view::BoardEvent, window, cx| {
             use crate::board::view::BoardEvent;
             match ev {
-                BoardEvent::Close => crate::objects::remove(&id),
+                BoardEvent::Close | BoardEvent::Cancel { .. } => crate::objects::remove(&id),
                 BoardEvent::Insert => {
                     this.editor.update(cx, |e, cx| e.insert_embed("board", &id, cx));
                     this.show_toast("已作为思维导图插入到光标处".into(), cx);

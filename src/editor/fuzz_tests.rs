@@ -998,3 +998,189 @@ fn code_block_long_line_scroll_immediate(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 往「文本绘图 / 公式 / HTML」源码块粘贴代码块片段时，应扁平化为纯文本写入当前源码槽，
+/// 不应在下方新建独立代码块。
+#[gpui::test]
+fn paste_fragment_into_diagram_stays_in_source_slot(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-diagram-paste-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("绘图粘贴测试")),
+        Block::new(BlockKind::Diagram { view: 2, offsets: Default::default() }, RichText::default()),
+    ]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "diagram-paste".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+
+    let src = "flowchart TD\n    A[\"开始\"] --> B[\"结束\"]";
+    win.update(&mut vcx, |ed, window, cx| {
+        window.focus(&ed.focus);
+        ed.set_cursor(Pos::new(1, 0, 0), false, cx);
+        // 模拟网页 HTML <pre><code> 或站内复制 Plain Text 代码块得到的片段
+        let code_blk = Block::new(BlockKind::Code { lang: "Plain Text".into(), wrap: false, height: None }, RichText::plain(src));
+        ed.insert_fragment(vec![code_blk], cx);
+        assert_eq!(ed.content.blocks.len(), 2, "不应在文本绘图块下方新建代码块");
+        assert!(matches!(ed.content.blocks[1].kind, BlockKind::Diagram { .. }));
+        assert_eq!(ed.content.blocks[1].text.text, src);
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 对齐飞书：
+/// 1. 代码块语言下拉列表中不包含 Mermaid（但语法高亮仍保留供文本绘图与画板使用）；
+/// 2. 粘贴完整的 ```mermaid ... ``` 或网页 `<code class="language-mermaid">` 块时，自动转为带可编辑源码分区的画板嵌入块。
+#[gpui::test]
+fn paste_fenced_mermaid_converts_to_board_embed(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-mermaid-board-paste-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+
+    // 1. 代码块语言列表不含 Mermaid，但 highlight("Mermaid", ...) 仍正常工作
+    assert!(!crate::highlight::filter_langs("").contains(&"Mermaid"));
+    assert!(crate::highlight::filter_langs("mermaid").is_empty());
+    assert!(!crate::highlight::highlight("Mermaid", "flowchart TD\nA --> B").is_empty());
+
+    // 2. 粘贴合法 ```mermaid ... ``` 经 md_to_blocks + upgrade_mermaid_blocks_to_board 转为画板嵌入块
+    let md = "```mermaid\nflowchart TD\n    A[\"开始\"] --> B{\"判断\"}\n    B -->|\"是\"| C[\"结束\"]\n```";
+    let mut blocks = crate::convert::md_to_blocks(md);
+    assert_eq!(blocks.len(), 1);
+    let (n, err) = super::clip::upgrade_mermaid_blocks_to_board(&mut blocks, false);
+    assert_eq!(n, 1);
+    assert!(err.is_none());
+
+    // 2b. 粘贴语法错误的 ```mermaid ... ``` 时，回落为 Plain Text 代码块并返回错误说明
+    let bad_md = "```mermaid\nflowchart TD\n    A[未闭合 --> B\n```";
+    let mut bad_blocks = crate::convert::md_to_blocks(bad_md);
+    let (bad_n, bad_err) = super::clip::upgrade_mermaid_blocks_to_board(&mut bad_blocks, false);
+    assert_eq!(bad_n, 0);
+    assert!(bad_err.is_some(), "语法错误应返回具体提示");
+    assert!(matches!(&bad_blocks[0].kind, BlockKind::Code { lang, .. } if lang == "Plain Text"));
+    assert!(bad_blocks[0].text.text.contains("A[未闭合 --> B"));
+    let BlockKind::Embed { kind, id } = &blocks[0].kind else {
+        panic!("应转换为画板嵌入块，实际：{:?}", blocks[0].kind);
+    };
+    assert_eq!(kind, "board");
+    let crate::objects::ObjData::Board(board) = crate::objects::load(id).expect("应已持久化到 objects 表") else {
+        panic!("嵌入对象应为画板");
+    };
+    // 画板内应包含带 Mermaid 源码的代码分区与已展开的图形/连线
+    assert!(board.els.iter().any(|e| e.code.as_deref().is_some_and(|c| c.contains("flowchart TD")) && e.code_lang == 1));
+    assert!(board.els.iter().any(|e| matches!(e.kind, crate::board::model::ElKind::Connector { route: crate::board::model::Route::RoundElbow, .. })));
+
+    // 3. 插入到文档正文后正常成为画板嵌入块
+    let doc = DocContent::from_blocks(vec![Block::new(BlockKind::Title, RichText::plain("飞书对齐测试")), Block::text("")]);
+    let win = cx.add_window(|_, cx| Editor::new(store.clone(), "mermaid-board-paste".into(), doc, cx));
+    let mut vcx = gpui::VisualTestContext::from_window(win.into(), cx);
+    vcx.run_until_parked();
+    win.update(&mut vcx, |ed, window, cx| {
+        window.focus(&ed.focus);
+        ed.set_cursor(Pos::new(1, 0, 0), false, cx);
+        ed.insert_fragment(blocks, cx);
+        assert!(ed.content.blocks.iter().any(|b| matches!(&b.kind, BlockKind::Embed { kind, .. } if kind == "board")));
+    })
+    .unwrap();
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 画板「取消」功能回归测试：
+/// 1. 新建空画板未画内容直接点「取消」：不弹确认框、触发 remove_embed 并自动清理文档里的空画板块；
+/// 2. 打开已有画板并修改内容后点「取消」：先弹出防误触确认框，确认放弃后将对象库回滚至进入前快照。
+#[gpui::test]
+fn board_cancel_discards_changes_and_removes_blank_embed(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-board-cancel-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+
+    // 场景 1：新建空画板，无改动点取消 → 不弹确认框，且文档中的空画板块可被清理
+    let blank_id = crate::objects::create(crate::objects::ObjKind::Board, None);
+    let blank_events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<bool>::new()));
+    let ev1 = blank_events.clone();
+    let bwin = cx.add_window(|_, cx| {
+        cx.subscribe_self(move |_, ev: &crate::board::view::BoardEvent, _| {
+            if let crate::board::view::BoardEvent::Cancel { remove_embed } = ev {
+                ev1.borrow_mut().push(*remove_embed);
+            }
+        })
+        .detach();
+        crate::board::view::BoardEditor::new(blank_id.clone(), cx)
+    });
+    let mut bvcx = gpui::VisualTestContext::from_window(bwin.into(), cx);
+    bwin.update(&mut bvcx, |b, _, cx| {
+        assert!(!b.is_dirty());
+        b.request_cancel(cx);
+    })
+    .unwrap();
+    bvcx.run_until_parked();
+    assert_eq!(*blank_events.borrow(), vec![true], "新建空画板直接取消应请求移除文档嵌入块");
+
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("画板取消测试")),
+        Block::new(BlockKind::Embed { kind: "board".into(), id: blank_id.clone() }, RichText::default()),
+    ]);
+    let ewin = cx.add_window(|_, cx| Editor::new(store.clone(), "board-cancel".into(), doc, cx));
+    let mut evcx = gpui::VisualTestContext::from_window(ewin.into(), cx);
+    ewin.update(&mut evcx, |ed, _, cx| {
+        ed.remove_embed_by_id(&blank_id, cx);
+        assert!(ed.content.blocks.iter().all(|b| !matches!(&b.kind, BlockKind::Embed { .. })), "文档中的空画板块应已被移除");
+    })
+    .unwrap();
+
+    // 场景 2：已有内容的画板修改后点取消 → 弹确认框，确认放弃后对象库恢复初始快照
+    let mut orig = crate::board::model::BoardDoc::new(false);
+    let mut el = orig.new_el(crate::board::model::ElKind::Shape(crate::canvas::ShapeKind::RoundRect), crate::canvas::rect(0., 0., 100., 50.), false);
+    el.text = "原始节点".into();
+    orig.els.push(el);
+    let existing_id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(std::sync::Arc::new(orig))));
+    let exist_events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<bool>::new()));
+    let ev2 = exist_events.clone();
+    let ewin2 = cx.add_window(|_, cx| {
+        cx.subscribe_self(move |_, ev: &crate::board::view::BoardEvent, _| {
+            if let crate::board::view::BoardEvent::Cancel { remove_embed } = ev {
+                ev2.borrow_mut().push(*remove_embed);
+            }
+        })
+        .detach();
+        crate::board::view::BoardEditor::new(existing_id.clone(), cx)
+    });
+    let mut bvcx2 = gpui::VisualTestContext::from_window(ewin2.into(), cx);
+    ewin2
+        .update(&mut bvcx2, |b, _, cx| {
+            // 模拟画板内新增内容并写入对象库
+            b.add_test_shape_and_commit("临时新增", cx);
+            assert!(b.is_dirty());
+            assert_eq!(crate::objects::board(&existing_id).unwrap().els.len(), 2);
+            // 第一次点取消：仅弹确认框，尚未发出取消事件
+            b.request_cancel(cx);
+            assert!(b.cancel_confirm_open(), "已有画板存在改动时应弹出确认框");
+        })
+        .unwrap();
+    bvcx2.run_until_parked();
+    assert!(exist_events.borrow().is_empty());
+
+    // 确认放弃：对象库恢复为 1 个原始节点，且不删除文档嵌入块
+    ewin2.update(&mut bvcx2, |b, _, cx| b.confirm_cancel(cx)).unwrap();
+    bvcx2.run_until_parked();
+    assert_eq!(*exist_events.borrow(), vec![false]);
+    let restored = crate::objects::board(&existing_id).unwrap();
+    assert_eq!(restored.els.len(), 1);
+    assert_eq!(restored.els[0].text, "原始节点");
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}

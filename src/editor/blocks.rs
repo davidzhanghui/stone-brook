@@ -418,6 +418,7 @@ impl Editor {
                     cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus);
+                        this.pop.diagram_view_menu = None;
                         this.pop.diagram_theme_menu = None;
                         if ev.click_count >= 2 {
                             // 双击：取消单击排下的弹框，进入源码编辑
@@ -486,6 +487,7 @@ impl Editor {
         let has_offsets = !offsets.is_empty();
         let kind_label = kind.map(|k| k.label()).unwrap_or("文本绘图");
         let is_flow = kind == Some(crate::diagram::Kind::Flowchart);
+        let view_menu_open = self.pop.diagram_view_menu == Some(ix);
         let menu_open = self.pop.diagram_theme_menu == Some(ix);
         let tb_btn = |id: &'static str, label: String, on: bool| {
             div()
@@ -500,6 +502,27 @@ impl Editor {
                 .hover(|s| s.bg(t.hover))
                 .child(crate::i18n::tr_owned(&label))
         };
+        let view_btn = div()
+            .relative()
+            .child(
+                tb_btn("dg-view", String::new(), view_menu_open)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(icon("layout-template", 13., if view_menu_open { t.accent } else { t.text_secondary }))
+                    .child(crate::i18n::tr("视图"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.pop.diagram_theme_menu = None;
+                            this.pop.diagram_view_menu = if this.pop.diagram_view_menu == Some(ix) { None } else { Some(ix) };
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .when(view_menu_open, |d| d.child(div().absolute().top(px(24.)).left_0().child(self.render_diagram_view_menu(ix, view_mode, t, cx))));
         let theme_btn = div()
             .relative()
             .child(
@@ -514,6 +537,7 @@ impl Editor {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
+                            this.pop.diagram_view_menu = None;
                             this.pop.diagram_theme_menu = if this.pop.diagram_theme_menu == Some(ix) { None } else { Some(ix) };
                             cx.notify();
                         }),
@@ -525,36 +549,9 @@ impl Editor {
             .flex_row()
             .items_center()
             .gap_1()
-            .when(!editing && !menu_open, |d| d.invisible().group_hover("dg", |s| s.visible()))
+            .when(!editing && !menu_open && !view_menu_open, |d| d.invisible().group_hover("dg", |s| s.visible()))
             .child(div().pr_2().text_size(px(12.)).text_color(t.text_muted).child(kind_label))
-            .child(tb_btn("dg-v0", "自动".into(), view_mode == 0).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_diagram_view(ix, 0, cx)
-                }),
-            ))
-            .child(tb_btn("dg-v1", "仅预览".into(), view_mode == 1).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_diagram_view(ix, 1, cx)
-                }),
-            ))
-            .child(tb_btn("dg-v2", "仅源码".into(), view_mode == 2).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_diagram_view(ix, 2, cx)
-                }),
-            ))
-            .child(tb_btn("dg-v3", "并排".into(), view_mode == 3).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_diagram_view(ix, 3, cx)
-                }),
-            ))
+            .child(view_btn)
             .child(div().w(px(1.)).h(px(14.)).mx_1().bg(t.border))
             .child(theme_btn)
             .when(scene.is_some(), |d| {
@@ -630,6 +627,7 @@ impl Editor {
     }
 
     fn set_diagram_view(&mut self, ix: usize, v: u8, cx: &mut Context<Self>) {
+        self.pop.diagram_view_menu = None;
         self.update_kind(
             ix,
             |k| {
@@ -639,6 +637,55 @@ impl Editor {
             },
             cx,
         );
+    }
+
+    /// 视图下拉菜单（自动 / 仅预览 / 仅源码 / 并排，仿飞书样式，当前项高亮打勾）。
+    fn render_diagram_view_menu(&self, ix: usize, view_mode: u8, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        const ITEMS: [(u8, &str); 4] = [(0, "自动"), (1, "仅预览"), (2, "仅源码"), (3, "并排")];
+        deferred(
+            anchored().snap_to_window_with_margin(px(8.)).child(
+                div()
+                    .id("dg-view-menu")
+                    .occlude()
+                    .w(px(124.))
+                    .p(px(4.))
+                    .bg(t.panel_bg)
+                    .border_1()
+                    .border_color(t.border)
+                    .rounded(px(8.))
+                    .shadow_lg()
+                    .text_size(px(13.))
+                    .children(ITEMS.iter().map(|&(v, label)| {
+                        let on = view_mode == v;
+                        div()
+                            .id(("dg-view-it", v as usize))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py(px(6.))
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.hover))
+                            .when(on, |d| d.bg(t.hover))
+                            .child(div().flex_1().text_color(if on { t.accent } else { t.text }).child(crate::i18n::tr(label)))
+                            .when(on, |d| d.child(icon("check", 14., t.accent)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.set_diagram_view(ix, v, cx);
+                                }),
+                            )
+                    }))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.pop.diagram_view_menu = None;
+                        cx.notify();
+                    })),
+            ),
+        )
+        .with_priority(3)
     }
 
     /// 配色下拉菜单（默认 / 灰色 / 绿色 / 黄色……，当前项打勾）。

@@ -5,6 +5,7 @@
 //! - 本文件：与文本绘图互相转换（Mermaid ⇄ 流程图）、自动布局
 
 mod code;
+pub use code::mermaid_board;
 pub mod drawio;
 mod find;
 pub mod iconlib;
@@ -34,9 +35,7 @@ pub fn from_mermaid(src: &str, dark: bool) -> Option<BoardDoc> {
     if !(first.starts_with("flowchart") || first.starts_with("graph")) {
         return None;
     }
-    let mut g = crate::diagram::flowchart::parse(&lines[0].1, &lines[1..]).ok()?;
-    // 不要场景里为曲线加的端头小段：拐点只取布局算出的那些，曲线由画板连线自己生成
-    g.curved = false;
+    let g = crate::diagram::flowchart::parse(&lines[0].1, &lines[1..]).ok()?;
     let theme = crate::diagram::Theme::default_light();
     let scene = g.to_scene(&theme, &mut EstimateMeasure, &BTreeMap::new());
     // 各条边的走线：端口在节点边上，中间为绕开其他节点的拐点
@@ -93,7 +92,7 @@ pub fn from_mermaid(src: &str, dark: bool) -> Option<BoardDoc> {
             ElKind::Connector {
                 a: anchor(a, pts.map(|p| p[0])),
                 b: anchor(c, pts.map(|p| *p.last().unwrap())),
-                route: Route::Elbow,
+                route: if e.from == e.to { Route::Curve } else { Route::RoundElbow },
                 start: e.start,
                 end: if e.end == Arrow::None && e.start == Arrow::None { Arrow::None } else { e.end },
             },
@@ -170,7 +169,7 @@ pub fn auto_layout(b: &mut BoardDoc) {
     for el in &b.els {
         if let ElKind::Connector { a: End::Bound { el: x, .. }, b: End::Bound { el: y, .. }, .. } = &el.kind {
             if let (Some(&fx), Some(&fy)) = (pos_of.get(x), pos_of.get(y)) {
-                edges.push(LEdge { from: fx, to: fy, minlen: 1 });
+                edges.push(LEdge { from: fx, to: fy, minlen: 1, label_w: 0. });
             }
         }
     }
