@@ -397,6 +397,8 @@ pub struct Popups {
     pub tl_menu: Option<timeline::TlMenu>,
     /// 斜杠菜单里 hover「表格」时右侧弹出的行列选择器
     pub table_picker: Option<TablePicker>,
+    /// 打开了「视图」下拉菜单的绘图块
+    pub diagram_view_menu: Option<usize>,
     /// 打开了「配色」下拉菜单的绘图块
     pub diagram_theme_menu: Option<usize>,
     pub sync_menu: bool,
@@ -662,6 +664,7 @@ impl Editor {
         self.pop.ordered_menu = None;
         self.pop.mention = None;
         self.pop.link_edit = None;
+        self.pop.diagram_view_menu = None;
         self.pop.diagram_theme_menu = None;
         self.pop.table_picker = None;
         self.refresh_comments();

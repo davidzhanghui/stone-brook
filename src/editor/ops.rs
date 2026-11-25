@@ -2052,7 +2052,11 @@ impl Editor {
     }
 
     pub fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sess.image_preview.take().is_some() || self.sess.diagram_preview.take().is_some() || self.pop.diagram_theme_menu.take().is_some() {
+        if self.sess.image_preview.take().is_some()
+            || self.sess.diagram_preview.take().is_some()
+            || self.pop.diagram_view_menu.take().is_some()
+            || self.pop.diagram_theme_menu.take().is_some()
+        {
             cx.notify();
             return;
         }
