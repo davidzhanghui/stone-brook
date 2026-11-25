@@ -12,6 +12,7 @@ type CmdFn = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 const COMMANDS: &[(&str, &str, &str, CmdFn)] = &[
     ("新建文档", "⌘N", "new xinjian wendang", |_, w, cx| w.dispatch_action(Box::new(NewDoc), cx)),
     ("新建子文档", "⇧⌘N", "sub zi wendang", |_, w, cx| w.dispatch_action(Box::new(NewSubDoc), cx)),
+    ("移动当前文档到…", "", "move yidong cengji parent folder", |_, w, cx| w.dispatch_action(Box::new(MoveDoc), cx)),
     ("从模板新建…", "", "template moban", |ws, _, cx| ws.open_templates(true, cx)),
     ("另存为模板", "", "save template moban lingcun", |ws, _, cx| ws.save_as_template(cx)),
     ("快速打开 / 全文搜索", "⌘P", "open search sousuo dakai", |_, w, cx| w.dispatch_action(Box::new(QuickOpen), cx)),

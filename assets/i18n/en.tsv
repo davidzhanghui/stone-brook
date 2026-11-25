@@ -554,3 +554,13 @@ LaTeX · 支持 KaTeX 全部语法	LaTeX · full KaTeX syntax
 从备份恢复	Restore backup
 有新版	Update
 设置 ⌘,（有新版本可安装）	Settings ⌘, (Update ready)
+移动到…	Move to…
+移动当前文档到…	Move current document to…
+移到根目录	Move to root
+根目录（顶层）	Root (top level)
+松手移到根目录	Drop to move to root
+导入 Markdown 到此文档下…	Import Markdown into this doc…
+搜索目标父文档或选择根目录…	Search target parent document or choose root…
+没有可移动的目标位置	No available destination
+当前所在	Current
+↵ 移动	↵ Move

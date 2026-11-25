@@ -24,6 +24,7 @@ actions!(
     [
         NewDoc,
         NewSubDoc,
+        MoveDoc,
         QuickOpen,
         ToggleSidebar,
         ToggleOutline,
@@ -81,6 +82,54 @@ struct Switcher {
     _sub: Subscription,
 }
 
+/// 「移动到…」弹窗状态。
+struct MovePicker {
+    doc_id: String,
+    input: Entity<LineInput>,
+    targets: Vec<tree::MoveTarget>,
+    selected: usize,
+    _sub: Subscription,
+}
+
+/// 侧边栏文档右键菜单。
+struct DocContextMenu {
+    doc_id: String,
+    position: Point<Pixels>,
+}
+
+/// 侧边栏文档拖拽负载。
+#[derive(Clone)]
+struct DragDoc {
+    id: String,
+    title: String,
+}
+
+/// 拖拽侧边栏文档时跟随鼠标的半透明预览胶囊。
+struct DocDragPreview(String);
+
+impl Render for DocDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        div()
+            .px_3()
+            .py_1()
+            .rounded(px(6.))
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.accent)
+            .shadow_md()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .text_color(t.text)
+            .opacity(0.92)
+            .child(icon("file", 14., t.accent))
+            .child(self.0.clone())
+    }
+}
+
 /// 破坏性操作前的二次确认（目前用于回收站里的「永久删除」）。
 /// 移到回收站这类可撤销的操作不弹窗，只用 toast 告知，避免高频打扰。
 struct Confirm {
@@ -129,6 +178,12 @@ pub struct Workspace {
     /// 用户主题文件的修改时间（变了就重新加载）
     theme_mtime: Option<std::time::SystemTime>,
     switcher: Option<Switcher>,
+    /// 侧边栏拖拽文档时的当前落点指示（无活跃拖拽时自动清空）
+    doc_drop_target: Option<tree::DropZone>,
+    /// 侧边栏文档右键菜单
+    doc_menu: Option<DocContextMenu>,
+    /// 「移动到…」目标选择器弹窗
+    move_picker: Option<MovePicker>,
     show_trash: bool,
     toast: Option<String>,
     toast_kind: ToastKind,
@@ -645,6 +700,9 @@ impl Workspace {
             theme_problems: vec![],
             theme_mtime: None,
             switcher: None,
+            doc_drop_target: None,
+            doc_menu: None,
+            move_picker: None,
             show_trash: false,
             toast: corrupt.map(|c| corrupt_msg(&c)),
             toast_kind: ToastKind::Info,
@@ -805,7 +863,7 @@ impl Workspace {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for d in &self.docs {
-            (&d.id, &d.title, d.updated, d.deleted).hash(&mut h);
+            (&d.id, &d.parent, &d.title, d.sort.to_bits(), d.updated, d.deleted).hash(&mut h);
         }
         h.finish()
     }
@@ -1203,6 +1261,12 @@ impl Workspace {
     }
 
     fn import_md(&mut self, _: &ImportMarkdown, _: &mut Window, cx: &mut Context<Self>) {
+        let parent = self.docs.iter().find(|d| d.id == self.current && !d.deleted).map(|d| d.id.clone());
+        self.import_md_into(parent, cx);
+    }
+
+    /// 弹出文件选择框，将选中的 Markdown / 飞书 DocxXML 导入到指定父文档下（`None` 为根目录）。
+    fn import_md_into(&mut self, parent: Option<String>, cx: &mut Context<Self>) {
         let rx =
             cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("导入".into()), ..Default::default() });
         cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
@@ -1211,7 +1275,7 @@ impl Workspace {
                     let Some(window) = cx.active_window() else { return };
                     window
                         .update(cx, |_, window, cx| {
-                            this.update(cx, |this, cx| this.import_files(paths, window, cx)).ok();
+                            this.update(cx, |this, cx| this.import_files(paths, parent, window, cx)).ok();
                         })
                         .ok();
                 })
@@ -1221,7 +1285,29 @@ impl Workspace {
         .detach();
     }
 
-    fn import_files(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// 从外部拖入侧边栏的 Markdown / DocxXML 文件：仅挑选支持的扩展名导入到对应父文档下。
+    fn import_external_paths(&mut self, paths: Vec<std::path::PathBuf>, parent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let matched: Vec<std::path::PathBuf> = paths
+            .into_iter()
+            .filter(|p| {
+                p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "xml"))
+            })
+            .collect();
+        if !matched.is_empty() {
+            self.import_files(matched, parent, window, cx);
+        }
+    }
+
+    fn import_files(&mut self, paths: Vec<std::path::PathBuf>, parent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // 校验父文档仍然有效（未删除），批量导入的全部文件都放到同一个父文档下，避免相互嵌套
+        let parent = parent.filter(|pid| self.docs.iter().any(|d| &d.id == pid && !d.deleted));
+        let parent_title = parent.as_ref().and_then(|pid| self.docs.iter().find(|d| &d.id == pid)).map(|d| {
+            if d.title.trim().is_empty() {
+                crate::i18n::tr("未命名文档").to_string()
+            } else {
+                d.title.trim().to_string()
+            }
+        });
         let mut n = 0;
         let mut failed = vec![];
         for p in paths {
@@ -1234,7 +1320,7 @@ impl Workspace {
                         if blocks[0].text.is_empty() {
                             blocks[0].text = crate::model::RichText::plain(stem);
                         }
-                        self.create_doc(None, DocContent::from_blocks(blocks), window, cx);
+                        self.create_doc(parent.clone(), DocContent::from_blocks(blocks), window, cx);
                         n += 1;
                     }
                     Err(e) => failed.push(format!("{stem}：{e}")),
@@ -1253,13 +1339,19 @@ impl Workspace {
             if blocks.first().is_none_or(|b| b.kind != BlockKind::Title) {
                 blocks.insert(0, crate::model::Block::new(BlockKind::Title, crate::model::RichText::plain(stem)));
             }
-            self.create_doc(None, DocContent::from_blocks(blocks), window, cx);
+            self.create_doc(parent.clone(), DocContent::from_blocks(blocks), window, cx);
             n += 1;
         }
         if let Some(first) = failed.first() {
             self.show_toast_for(format!("有 {} 个文件没能导入（{first}）", failed.len()), 6000, cx);
         } else if n > 0 {
-            self.show_toast(format!("已导入 {n} 篇文档"), cx);
+            let msg = match (crate::i18n::english(), parent_title) {
+                (false, Some(pt)) => format!("已导入 {n} 篇文档到「{pt}」下"),
+                (false, None) => format!("已导入 {n} 篇文档"),
+                (true, Some(pt)) => format!("Imported {n} document(s) into “{pt}”"),
+                (true, None) => format!("Imported {n} document(s)"),
+            };
+            self.show_toast(msg, cx);
         }
     }
 
@@ -1333,6 +1425,330 @@ impl Workspace {
         cx.notify();
     }
 
+    // ───────────── 文档层级移动 ─────────────
+
+    fn doc_display_title(&self, id: &str) -> String {
+        self.docs
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.title.trim())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::i18n::tr("未命名文档").to_string())
+    }
+
+    /// 按指定落点移动文档（支持跨层级移动与同级排序，自动防成环并展开新父文档）。
+    fn move_doc_to_zone(&mut self, doc_id: &str, zone: tree::DropZone, cx: &mut Context<Self>) {
+        let Some(plan) = tree::plan_move(&self.docs, doc_id, &zone) else { return };
+        let old_parent = self.docs.iter().find(|d| d.id == doc_id).and_then(|d| d.parent.clone());
+        let doc_title = self.doc_display_title(doc_id);
+        let target_title = plan.new_parent.as_deref().map(|pid| self.doc_display_title(pid));
+        if !self.store.move_doc(doc_id, plan.new_parent.as_deref(), &plan.sibling_order) {
+            return;
+        }
+        if let Some(pid) = &plan.new_parent {
+            self.expanded.insert(pid.clone());
+        }
+        self.reload_docs();
+        if old_parent != plan.new_parent {
+            let msg = match (crate::i18n::english(), target_title) {
+                (false, Some(pt)) => format!("已将「{doc_title}」移到「{pt}」下"),
+                (false, None) => format!("已将「{doc_title}」移到根目录"),
+                (true, Some(pt)) => format!("Moved “{doc_title}” into “{pt}”"),
+                (true, None) => format!("Moved “{doc_title}” to root"),
+            };
+            self.show_toast(msg, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_current_doc(&mut self, _: &MoveDoc, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.current.clone();
+        self.open_move_picker(id, window, cx);
+    }
+
+    fn open_move_picker(&mut self, doc_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.docs.iter().any(|d| d.id == doc_id && !d.deleted) {
+            return;
+        }
+        self.more_menu = false;
+        self.doc_menu = None;
+        let input = cx.new(|cx| LineInput::new("搜索目标父文档或选择根目录…", cx));
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Changed => this.refresh_move_picker(cx),
+            InputEvent::Up => {
+                if let Some(p) = &mut this.move_picker {
+                    p.selected = p.selected.saturating_sub(1);
+                    cx.notify();
+                }
+            }
+            InputEvent::Down => {
+                if let Some(p) = &mut this.move_picker {
+                    p.selected = (p.selected + 1).min(p.targets.len().saturating_sub(1));
+                    cx.notify();
+                }
+            }
+            InputEvent::Submit { .. } => {
+                let picked = this.move_picker.as_ref().and_then(|p| p.targets.get(p.selected).map(|t| (p.doc_id.clone(), t.parent.clone(), t.is_current)));
+                this.close_move_picker(window, cx);
+                if let Some((doc_id, parent, is_current)) = picked {
+                    if !is_current {
+                        let zone = match parent {
+                            Some(pid) => tree::DropZone::Into(pid),
+                            None => tree::DropZone::RootEnd,
+                        };
+                        this.move_doc_to_zone(&doc_id, zone, cx);
+                    }
+                }
+            }
+            InputEvent::Cancel => this.close_move_picker(window, cx),
+        });
+        window.focus(&input.focus_handle(cx));
+        self.move_picker = Some(MovePicker { doc_id, input, targets: vec![], selected: 0, _sub: sub });
+        self.refresh_move_picker(cx);
+    }
+
+    fn refresh_move_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &self.move_picker else { return };
+        let q = p.input.read(cx).text();
+        let targets = tree::move_targets(&self.docs, &p.doc_id, &q);
+        let p = self.move_picker.as_mut().unwrap();
+        p.targets = targets;
+        p.selected = p.targets.iter().position(|t| !t.is_current).unwrap_or(0);
+        cx.notify();
+    }
+
+    fn close_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_picker.take().is_some() {
+            window.focus(&self.editor.focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    fn render_move_picker(&self, t: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let p = self.move_picker.as_ref()?;
+        let q = p.input.read(cx).text();
+        let searching = !q.trim().is_empty();
+        let doc_title = self.doc_display_title(&p.doc_id);
+        let doc_id = p.doc_id.clone();
+        let heading = if crate::i18n::english() { format!("Move “{doc_title}” to…") } else { format!("将「{doc_title}」移动到…") };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(t.overlay)
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(110.))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, w, cx| this.close_move_picker(w, cx)))
+                .child(
+                    div()
+                        .w(px(540.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded(px(12.))
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .px(px(16.))
+                                .pt(px(12.))
+                                .pb(px(4.))
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.text_muted)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(heading),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.))
+                                .px(px(16.))
+                                .h(px(46.))
+                                .border_b_1()
+                                .border_color(t.border)
+                                .text_size(px(15.))
+                                .line_height(px(22.))
+                                .child(icon("search", 16., t.text_muted))
+                                .child(p.input.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("mp-results")
+                                .max_h(px(400.))
+                                .overflow_y_scroll()
+                                .p(px(6.))
+                                .when(p.targets.is_empty(), |d| {
+                                    d.child(div().px_3().py_4().text_size(px(13.)).text_color(t.text_muted).child(crate::i18n::tr("没有可移动的目标位置")))
+                                })
+                                .children(p.targets.iter().enumerate().map(|(i, target)| {
+                                    let doc_id = doc_id.clone();
+                                    let parent = target.parent.clone();
+                                    let is_current = target.is_current;
+                                    let is_root = target.parent.is_none();
+                                    let sel = i == p.selected;
+                                    let indent = if searching || is_root { 10. } else { 10. + target.depth as f32 * 18. };
+                                    let label = if is_root { crate::i18n::tr("根目录（顶层）").to_string() } else { target.title.clone() };
+                                    div()
+                                        .id(("mp", i))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .pl(px(indent))
+                                        .pr(px(10.))
+                                        .py(px(8.))
+                                        .rounded(px(8.))
+                                        .when(!is_current, |d| d.cursor_pointer().hover(|s| s.bg(t.hover)))
+                                        .when(is_current, |d| d.opacity(0.6))
+                                        .when(sel && !is_current, |d| d.bg(t.active))
+                                        .child(icon(if is_root { "folder" } else { "file" }, 15., if sel && !is_current { t.accent } else { t.text_muted }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .flex()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(14.))
+                                                        .text_color(t.text)
+                                                        .whitespace_nowrap()
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .child(label),
+                                                )
+                                                .when(searching && !target.path.is_empty(), |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_size(px(11.5))
+                                                            .text_color(t.text_muted)
+                                                            .whitespace_nowrap()
+                                                            .overflow_hidden()
+                                                            .text_ellipsis()
+                                                            .child(target.path.clone()),
+                                                    )
+                                                }),
+                                        )
+                                        .when(is_current, |d| d.child(div().text_size(px(11.)).text_color(t.text_muted).child(crate::i18n::tr("当前所在"))))
+                                        .when(sel && !is_current, |d| {
+                                            d.child(div().text_size(px(11.)).text_color(t.text_muted).child(crate::i18n::tr("↵ 移动")))
+                                        })
+                                        .when(!is_current, |d| {
+                                            d.on_click(cx.listener(move |this, _, w, cx| {
+                                                this.close_move_picker(w, cx);
+                                                let zone = match &parent {
+                                                    Some(pid) => tree::DropZone::Into(pid.clone()),
+                                                    None => tree::DropZone::RootEnd,
+                                                };
+                                                this.move_doc_to_zone(&doc_id, zone, cx);
+                                            }))
+                                        })
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(14.))
+                                .px(px(16.))
+                                .py(px(8.))
+                                .border_t_1()
+                                .border_color(t.border)
+                                .text_size(px(11.))
+                                .text_color(t.text_muted)
+                                .child(crate::i18n::tr("↑↓ 选择"))
+                                .child(crate::i18n::tr("↵ 移动"))
+                                .child(crate::i18n::tr("esc 关闭")),
+                        ),
+                ),
+        )
+    }
+
+    fn render_doc_menu(&self, t: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let menu = self.doc_menu.as_ref()?;
+        let doc = self.docs.iter().find(|d| d.id == menu.doc_id && !d.deleted)?;
+        let has_parent = doc.parent.is_some();
+        let (id1, id2, id3, id4, id5, id6) = (doc.id.clone(), doc.id.clone(), doc.id.clone(), doc.id.clone(), doc.id.clone(), doc.id.clone());
+        let item = |id: &'static str, ic: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover))
+                .child(icon(ic, 14., t.text_secondary))
+                .child(div().flex_1().child(crate::i18n::tr(label)))
+        };
+        let sep = || div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(t.border);
+        Some(
+            deferred(
+                anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .id("doc-ctx-menu")
+                        .occlude()
+                        .w(px(236.))
+                        .p(px(6.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded(px(10.))
+                        .shadow_lg()
+                        .text_size(px(13.))
+                        .text_color(t.text)
+                        .child(item("ctx-sub", "plus", "新建子文档").on_click(cx.listener(move |this, _, w, cx| {
+                            this.doc_menu = None;
+                            this.create_doc(Some(id1.clone()), DocContent::new_empty(""), w, cx);
+                        })))
+                        .child(item("ctx-imp", "upload", "导入 Markdown 到此文档下…").on_click(cx.listener(move |this, _, _, cx| {
+                            this.doc_menu = None;
+                            this.import_md_into(Some(id2.clone()), cx);
+                            cx.notify();
+                        })))
+                        .child(sep())
+                        .child(item("ctx-move", "folder", "移动到…").on_click(cx.listener(move |this, _, w, cx| {
+                            this.doc_menu = None;
+                            this.open_move_picker(id3.clone(), w, cx);
+                        })))
+                        .when(has_parent, |d| {
+                            d.child(item("ctx-root", "arrow-up-to-line", "移到根目录").on_click(cx.listener(move |this, _, _, cx| {
+                                this.doc_menu = None;
+                                this.move_doc_to_zone(&id4, tree::DropZone::RootEnd, cx);
+                            })))
+                        })
+                        .child(item("ctx-dup", "copy", "创建副本").on_click(cx.listener(move |this, _, w, cx| {
+                            this.doc_menu = None;
+                            this.duplicate_doc_id(id5.clone(), w, cx);
+                        })))
+                        .child(sep())
+                        .child(item("ctx-trash", "trash", "移到回收站").on_click(cx.listener(move |this, _, w, cx| {
+                            this.doc_menu = None;
+                            this.trash_doc_id(id6.clone(), w, cx);
+                        })))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.doc_menu = None;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .with_priority(6),
+        )
+    }
+
     // ───────────── 渲染 ─────────────
 
     fn children_of(&self) -> HashMap<Option<String>, Vec<usize>> {
@@ -1358,30 +1774,104 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(kids) = map.get(&parent) else { return };
+        let dragging = cx.has_active_drag();
         for &i in kids {
             let d = &self.docs[i];
             let id = d.id.clone();
             let has_kids = map.get(&Some(id.clone())).is_some_and(|k| !k.is_empty());
             let open = self.expanded.contains(&id);
             let active = id == self.current;
-            let title: SharedString = if d.title.trim().is_empty() { "未命名文档".into() } else { d.title.clone().into() };
-            let (id1, id2, id3, id4, id5) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+            let title_str = if d.title.trim().is_empty() { "未命名文档".to_string() } else { d.title.clone() };
+            let title: SharedString = title_str.clone().into();
+            let indent = 6. + depth as f32 * 16.;
+            let is_before = dragging && self.doc_drop_target.as_ref() == Some(&tree::DropZone::Before(id.clone()));
+            let is_into = dragging && self.doc_drop_target.as_ref() == Some(&tree::DropZone::Into(id.clone()));
+            let is_after = dragging && self.doc_drop_target.as_ref() == Some(&tree::DropZone::After(id.clone()));
+            let (id1, id2, id3, id4, id5, id_move, id_drop, id_ext, id_ctx) =
+                (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+            let accent = t.accent;
+            let accent_soft = t.accent_soft;
+            let expanded_with_kids = has_kids && open;
             out.push(
                 div()
                     .id(SharedString::from(format!("doc-{id}")))
+                    .relative()
                     .group("doc")
                     .flex()
                     .flex_row()
                     .items_center()
                     .h(px(32.))
-                    .pl(px(6. + depth as f32 * 16.))
+                    .pl(px(indent))
                     .pr(px(6.))
                     .mx(px(8.))
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(14.))
-                    .when(active, |d| d.bg(t.active).text_color(t.accent).font_weight(FontWeight::MEDIUM))
-                    .when(!active, |d| d.text_color(t.text).hover(|s| s.bg(t.hover)))
+                    .when(active && !is_into, |d| d.bg(t.active).text_color(t.accent).font_weight(FontWeight::MEDIUM))
+                    .when(!active && !is_into, |d| d.text_color(t.text).hover(|s| s.bg(t.hover)))
+                    .when(is_into, |d| d.bg(accent_soft).border_1().border_color(accent).text_color(accent))
+                    .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(accent_soft).border_1().border_color(accent))
+                    .on_drag(DragDoc { id: id.clone(), title: title_str }, |d: &DragDoc, _, _, cx| cx.new(|_| DocDragPreview(d.title.clone())))
+                    .on_drag_move::<DragDoc>(cx.listener(move |this, ev: &DragMoveEvent<DragDoc>, _, cx| {
+                        if !ev.bounds.contains(&ev.event.position) {
+                            return;
+                        }
+                        let h = f32::from(ev.bounds.size.height).max(1.0);
+                        let rel = (f32::from(ev.event.position.y) - f32::from(ev.bounds.origin.y)) / h;
+                        let zone = if rel < 0.25 {
+                            tree::DropZone::Before(id_move.clone())
+                        } else if rel > 0.75 && !expanded_with_kids {
+                            tree::DropZone::After(id_move.clone())
+                        } else {
+                            tree::DropZone::Into(id_move.clone())
+                        };
+                        let drag_id = ev.drag(cx).id.clone();
+                        let next = tree::plan_move(&this.docs, &drag_id, &zone).map(|_| zone);
+                        if this.doc_drop_target != next {
+                            this.doc_drop_target = next;
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop(cx.listener(move |this, d: &DragDoc, _, cx| {
+                        let zone = this.doc_drop_target.take().unwrap_or_else(|| tree::DropZone::Into(id_drop.clone()));
+                        this.move_doc_to_zone(&d.id, zone, cx);
+                    }))
+                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                        this.import_external_paths(paths.paths().to_vec(), Some(id_ext.clone()), window, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.more_menu = false;
+                            this.doc_menu = Some(DocContextMenu { doc_id: id_ctx.clone(), position: ev.position });
+                            cx.notify();
+                        }),
+                    )
+                    .when(is_before, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(-1.))
+                                .left(px(indent))
+                                .right(px(6.))
+                                .h(px(2.))
+                                .bg(accent)
+                                .child(div().absolute().left(px(-3.)).top(px(-2.)).size(px(6.)).rounded_full().bg(accent)),
+                        )
+                    })
+                    .when(is_after, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(-1.))
+                                .left(px(indent))
+                                .right(px(6.))
+                                .h(px(2.))
+                                .bg(accent)
+                                .child(div().absolute().left(px(-3.)).top(px(-2.)).size(px(6.)).rounded_full().bg(accent)),
+                        )
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("chev-{id}")))
@@ -1403,7 +1893,7 @@ impl Workspace {
                                 )
                             }),
                     )
-                    .child(div().ml(px(2.)).mr(px(6.)).child(icon("file", 15., if active { t.accent } else { t.text_muted })))
+                    .child(div().ml(px(2.)).mr(px(6.)).child(icon("file", 15., if active || is_into { t.accent } else { t.text_muted })))
                     .child(
                         div()
                             .flex_1()
@@ -1574,8 +2064,111 @@ impl Workspace {
                 nav_item("nav-new", "plus", "新建文档", crate::shortcuts::hint("stonebrook::NewDoc", cx))
                     .on_click(cx.listener(|this, _, w, cx| this.new_doc(&NewDoc, w, cx))),
             )
-            .child(div().px(px(18.)).pt(px(14.)).pb(px(6.)).text_size(px(12.)).text_color(t.text_muted).child(crate::i18n::tr("我的文档")))
-            .child(div().id("tree").flex_1().min_h(px(0.)).overflow_y_scroll().pb_2().children(rows))
+            .child({
+                let dragging = cx.has_active_drag();
+                let root_start = dragging && self.doc_drop_target == Some(tree::DropZone::RootStart);
+                let root_end = dragging && self.doc_drop_target == Some(tree::DropZone::RootEnd);
+                let (accent, accent_soft) = (t.accent, t.accent_soft);
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .on_drag_move::<DragDoc>(cx.listener(|this, ev: &DragMoveEvent<DragDoc>, _, cx| {
+                        if !ev.bounds.contains(&ev.event.position) && this.doc_drop_target.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id("tree-root-head")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .mx(px(8.))
+                            .mt(px(10.))
+                            .mb(px(4.))
+                            .px(px(10.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .text_size(px(12.))
+                            .text_color(if root_start { accent } else { t.text_muted })
+                            .when(root_start, |d| d.bg(accent_soft).border_1().border_color(accent))
+                            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(accent_soft).border_1().border_color(accent))
+                            .on_drag_move::<DragDoc>(cx.listener(|this, ev: &DragMoveEvent<DragDoc>, _, cx| {
+                                if !ev.bounds.contains(&ev.event.position) {
+                                    return;
+                                }
+                                let drag_id = ev.drag(cx).id.clone();
+                                let zone = tree::DropZone::RootStart;
+                                let next = tree::plan_move(&this.docs, &drag_id, &zone).map(|_| zone);
+                                if this.doc_drop_target != next {
+                                    this.doc_drop_target = next;
+                                    cx.notify();
+                                }
+                            }))
+                            .on_drop(cx.listener(|this, d: &DragDoc, _, cx| {
+                                this.doc_drop_target = None;
+                                this.move_doc_to_zone(&d.id, tree::DropZone::RootStart, cx);
+                            }))
+                            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                                this.import_external_paths(paths.paths().to_vec(), None, window, cx);
+                            }))
+                            .child(crate::i18n::tr("我的文档"))
+                            .when(root_start, |d| d.child(div().text_size(px(11.)).text_color(accent).child(crate::i18n::tr("移到根目录")))),
+                    )
+                    .child(
+                        div().id("tree").flex_1().min_h(px(0.)).flex().flex_col().overflow_y_scroll().pb_2().children(rows).child(
+                            div()
+                                .id("tree-root-drop")
+                                .relative()
+                                .flex_1()
+                                .min_h(px(64.))
+                                .mx(px(8.))
+                                .mt(px(2.))
+                                .rounded(px(6.))
+                                .flex()
+                                .items_start()
+                                .justify_center()
+                                .pt(px(10.))
+                                .when(root_end, |d| {
+                                    d.bg(accent_soft)
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(0.))
+                                                .left(px(6.))
+                                                .right(px(6.))
+                                                .h(px(2.))
+                                                .bg(accent)
+                                                .child(div().absolute().left(px(-3.)).top(px(-2.)).size(px(6.)).rounded_full().bg(accent)),
+                                        )
+                                        .child(div().text_size(px(11.5)).text_color(accent).child(crate::i18n::tr("松手移到根目录")))
+                                })
+                                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(accent_soft).border_1().border_color(accent))
+                                .on_drag_move::<DragDoc>(cx.listener(|this, ev: &DragMoveEvent<DragDoc>, _, cx| {
+                                    if !ev.bounds.contains(&ev.event.position) {
+                                        return;
+                                    }
+                                    let drag_id = ev.drag(cx).id.clone();
+                                    let zone = tree::DropZone::RootEnd;
+                                    let next = tree::plan_move(&this.docs, &drag_id, &zone).map(|_| zone);
+                                    if this.doc_drop_target != next {
+                                        this.doc_drop_target = next;
+                                        cx.notify();
+                                    }
+                                }))
+                                .on_drop(cx.listener(|this, d: &DragDoc, _, cx| {
+                                    this.doc_drop_target = None;
+                                    this.move_doc_to_zone(&d.id, tree::DropZone::RootEnd, cx);
+                                }))
+                                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                                    this.import_external_paths(paths.paths().to_vec(), None, window, cx);
+                                })),
+                        ),
+                    )
+            })
             .when(self.show_trash, |d| {
                 d.child(
                     div()
@@ -1894,6 +2487,7 @@ impl Workspace {
             .text_size(px(13.))
             .text_color(t.text)
             .child(item("m-sub", "plus", "新建子文档", crate::shortcuts::hint("stonebrook::NewSubDoc", cx)).on_click(act!(NewSubDoc)))
+            .child(item("m-move", "folder", "移动到…", String::new()).on_click(act!(MoveDoc)))
             .child(item("m-dup-doc", "copy", "创建副本", String::new()).on_click(cx.listener(|this, _, w, cx| {
                 this.more_menu = false;
                 let id = this.current.clone();
@@ -2573,6 +3167,9 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() && self.doc_drop_target.is_some() {
+            self.doc_drop_target = None;
+        }
         self.sync_doc_list(cx);
         if let Some((kind, id)) = self.pending_embed.take() {
             self.open_embed(&kind, &id, window, cx);
@@ -2602,6 +3199,7 @@ impl Render for Workspace {
             .font_family("PingFang SC")
             .on_action(cx.listener(Self::new_doc))
             .on_action(cx.listener(Self::new_sub_doc))
+            .on_action(cx.listener(Self::move_current_doc))
             .on_action(cx.listener(Self::quick_open))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
@@ -2621,15 +3219,22 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &InstallUpdate, _, cx| this.install_update(cx)))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape"
-                    && (this.confirm.is_some() || this.settings_open || this.update_dialog_open || this.template_picker.is_some() || this.base_picker.is_some())
+                    && (this.confirm.is_some()
+                        || this.settings_open
+                        || this.update_dialog_open
+                        || this.template_picker.is_some()
+                        || this.base_picker.is_some()
+                        || this.doc_menu.is_some()
+                        || this.move_picker.is_some())
                 {
-                    if this.confirm.take().is_some() {
+                    if this.confirm.take().is_some() || this.move_picker.take().is_some() {
                         window.focus(&this.editor.focus_handle(cx));
                     }
                     this.settings_open = false;
                     this.update_dialog_open = false;
                     this.template_picker = None;
                     this.base_picker = None;
+                    this.doc_menu = None;
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -2675,6 +3280,8 @@ impl Render for Workspace {
                 ),
             )
             .children(self.render_switcher(&t, cx))
+            .children(self.render_move_picker(&t, cx))
+            .children(self.render_doc_menu(&t, cx))
             .when(self.about, |d| d.child(self.render_about(&t, cx)))
             .when(self.template_picker.is_some(), |d| d.child(self.render_templates(&t, cx)))
             .children(self.render_base_picker(&t, cx))

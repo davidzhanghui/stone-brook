@@ -187,6 +187,7 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action(crate::i18n::tr("新建文档"), NewDoc),
                 MenuItem::action(crate::i18n::tr("新建子文档"), NewSubDoc),
+                MenuItem::action(crate::i18n::tr("移动到…"), MoveDoc),
                 MenuItem::action(crate::i18n::tr("快速打开…"), QuickOpen),
                 MenuItem::separator(),
                 MenuItem::action(crate::i18n::tr("导入 Markdown…"), ImportMarkdown),

@@ -38,6 +38,7 @@ pub struct DocMeta {
     pub id: String,
     pub parent: Option<String>,
     pub title: String,
+    pub sort: f64,
     pub updated: i64,
     pub deleted: bool,
 }
@@ -525,8 +526,8 @@ impl Store {
     }
 
     pub fn list(&self) -> Vec<DocMeta> {
-        self.rows("SELECT id, parent, title, updated, deleted FROM docs ORDER BY sort, created", [], |r| {
-            Ok(DocMeta { id: r.get(0)?, parent: r.get(1)?, title: r.get(2)?, updated: r.get(3)?, deleted: r.get::<_, i64>(4)? != 0 })
+        self.rows("SELECT id, parent, title, sort, updated, deleted FROM docs ORDER BY sort, created", [], |r| {
+            Ok(DocMeta { id: r.get(0)?, parent: r.get(1)?, title: r.get(2)?, sort: r.get(3)?, updated: r.get(4)?, deleted: r.get::<_, i64>(5)? != 0 })
         })
     }
 
@@ -602,6 +603,48 @@ impl Store {
             tx.execute("INSERT INTO docs_fts (rowid, title, plain) VALUES (?1, ?2, ?3)", params![fts, title, plain])?;
             tx.commit()
         });
+    }
+
+    /// 移动文档到新的父文档（`None` 为根目录），并按 `sibling_order` 重排该层级兄弟文档的 `sort`。
+    /// 事务内做防成环校验（拒绝移到自身或自己的子孙下）。返回是否实际执行了移动。
+    pub fn move_doc(&self, id: &str, new_parent: Option<&str>, sibling_order: &[String]) -> bool {
+        let id = id.to_string();
+        let new_parent = new_parent.map(str::to_string);
+        let order: Vec<String> = sibling_order.to_vec();
+        let moved = Arc::new(AtomicBool::new(false));
+        let moved_flag = moved.clone();
+        self.write_sync(move |c| {
+            let tx = c.transaction()?;
+            if let Some(pid) = &new_parent {
+                if pid == &id {
+                    return tx.commit();
+                }
+                let target_alive: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM docs WHERE id = ?1 AND deleted = 0)", [pid], |r| r.get(0))?;
+                if !target_alive {
+                    return tx.commit();
+                }
+                let cycle: bool = tx.query_row(
+                    "WITH RECURSIVE sub(id) AS (SELECT ?1 UNION ALL SELECT d.id FROM docs d JOIN sub ON d.parent = sub.id)
+                     SELECT EXISTS(SELECT 1 FROM sub WHERE id = ?2)",
+                    params![id, pid],
+                    |r| r.get(0),
+                )?;
+                if cycle {
+                    return tx.commit();
+                }
+            }
+            let n = tx.execute("UPDATE docs SET parent = ?2 WHERE id = ?1 AND deleted = 0", params![id, new_parent])?;
+            if n == 0 {
+                return tx.commit();
+            }
+            for (idx, sid) in order.iter().enumerate() {
+                tx.execute("UPDATE docs SET sort = ?2 WHERE id = ?1", params![sid, (idx + 1) as f64])?;
+            }
+            tx.commit()?;
+            moved_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        moved.load(Ordering::SeqCst)
     }
 
     pub fn set_deleted(&self, id: &str, deleted: bool) {
@@ -1129,6 +1172,34 @@ mod tests {
         s.purge(&id);
         assert!(s.search("过的标", 10).is_empty());
         assert!(s.search("文档标", 10).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_doc_reparents_reorders_and_blocks_cycles() {
+        let (s, dir) = temp_store("move-doc");
+        let a = s.create(None, &DocContent::new_empty("A"));
+        let a1 = s.create(Some(&a), &DocContent::new_empty("A1"));
+        let b = s.create(None, &DocContent::new_empty("B"));
+        let c = s.create(None, &DocContent::new_empty("C"));
+
+        // C 移入 A 下，并排在 A1 前面
+        assert!(s.move_doc(&c, Some(&a), &[c.clone(), a1.clone()]));
+        let list = s.list();
+        let c_meta = list.iter().find(|d| d.id == c).unwrap();
+        assert_eq!(c_meta.parent.as_deref(), Some(a.as_str()));
+        let a_kids: Vec<&str> = list.iter().filter(|d| d.parent.as_deref() == Some(a.as_str())).map(|d| d.id.as_str()).collect();
+        assert_eq!(a_kids, vec![c.as_str(), a1.as_str()]);
+
+        // 防止成环：不能把 A 移入自己的子文档 C 或自己
+        assert!(!s.move_doc(&a, Some(&a), std::slice::from_ref(&a)));
+        assert!(!s.move_doc(&a, Some(&c), std::slice::from_ref(&a)));
+
+        // 把 A1 移到根目录 B 前面
+        assert!(s.move_doc(&a1, None, &[a.clone(), a1.clone(), b.clone()]));
+        let roots: Vec<String> = s.list().into_iter().filter(|d| d.parent.is_none()).map(|d| d.id).collect();
+        assert_eq!(roots, vec![a, a1, b]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
