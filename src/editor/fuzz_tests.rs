@@ -1094,3 +1094,93 @@ fn paste_fenced_mermaid_converts_to_board_embed(cx: &mut TestAppContext) {
     std::env::remove_var(crate::store::DATA_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 画板「取消」功能回归测试：
+/// 1. 新建空画板未画内容直接点「取消」：不弹确认框、触发 remove_embed 并自动清理文档里的空画板块；
+/// 2. 打开已有画板并修改内容后点「取消」：先弹出防误触确认框，确认放弃后将对象库回滚至进入前快照。
+#[gpui::test]
+fn board_cancel_discards_changes_and_removes_blank_embed(cx: &mut TestAppContext) {
+    let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("stonebrook-board-cancel-{}", std::process::id()));
+    std::env::set_var(crate::store::DATA_DIR_ENV, &dir);
+    let store = crate::store::Store::open().unwrap();
+    cx.update(|cx| cx.set_global(crate::theme::Theme::light()));
+
+    // 场景 1：新建空画板，无改动点取消 → 不弹确认框，且文档中的空画板块可被清理
+    let blank_id = crate::objects::create(crate::objects::ObjKind::Board, None);
+    let blank_events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<bool>::new()));
+    let ev1 = blank_events.clone();
+    let bwin = cx.add_window(|_, cx| {
+        cx.subscribe_self(move |_, ev: &crate::board::view::BoardEvent, _| {
+            if let crate::board::view::BoardEvent::Cancel { remove_embed } = ev {
+                ev1.borrow_mut().push(*remove_embed);
+            }
+        })
+        .detach();
+        crate::board::view::BoardEditor::new(blank_id.clone(), cx)
+    });
+    let mut bvcx = gpui::VisualTestContext::from_window(bwin.into(), cx);
+    bwin.update(&mut bvcx, |b, _, cx| {
+        assert!(!b.is_dirty());
+        b.request_cancel(cx);
+    })
+    .unwrap();
+    bvcx.run_until_parked();
+    assert_eq!(*blank_events.borrow(), vec![true], "新建空画板直接取消应请求移除文档嵌入块");
+
+    let doc = DocContent::from_blocks(vec![
+        Block::new(BlockKind::Title, RichText::plain("画板取消测试")),
+        Block::new(BlockKind::Embed { kind: "board".into(), id: blank_id.clone() }, RichText::default()),
+    ]);
+    let ewin = cx.add_window(|_, cx| Editor::new(store.clone(), "board-cancel".into(), doc, cx));
+    let mut evcx = gpui::VisualTestContext::from_window(ewin.into(), cx);
+    ewin.update(&mut evcx, |ed, _, cx| {
+        ed.remove_embed_by_id(&blank_id, cx);
+        assert!(ed.content.blocks.iter().all(|b| !matches!(&b.kind, BlockKind::Embed { .. })), "文档中的空画板块应已被移除");
+    })
+    .unwrap();
+
+    // 场景 2：已有内容的画板修改后点取消 → 弹确认框，确认放弃后对象库恢复初始快照
+    let mut orig = crate::board::model::BoardDoc::new(false);
+    let mut el = orig.new_el(crate::board::model::ElKind::Shape(crate::canvas::ShapeKind::RoundRect), crate::canvas::rect(0., 0., 100., 50.), false);
+    el.text = "原始节点".into();
+    orig.els.push(el);
+    let existing_id = crate::objects::create(crate::objects::ObjKind::Board, Some(crate::objects::ObjData::Board(std::sync::Arc::new(orig))));
+    let exist_events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<bool>::new()));
+    let ev2 = exist_events.clone();
+    let ewin2 = cx.add_window(|_, cx| {
+        cx.subscribe_self(move |_, ev: &crate::board::view::BoardEvent, _| {
+            if let crate::board::view::BoardEvent::Cancel { remove_embed } = ev {
+                ev2.borrow_mut().push(*remove_embed);
+            }
+        })
+        .detach();
+        crate::board::view::BoardEditor::new(existing_id.clone(), cx)
+    });
+    let mut bvcx2 = gpui::VisualTestContext::from_window(ewin2.into(), cx);
+    ewin2
+        .update(&mut bvcx2, |b, _, cx| {
+            // 模拟画板内新增内容并写入对象库
+            b.add_test_shape_and_commit("临时新增", cx);
+            assert!(b.is_dirty());
+            assert_eq!(crate::objects::board(&existing_id).unwrap().els.len(), 2);
+            // 第一次点取消：仅弹确认框，尚未发出取消事件
+            b.request_cancel(cx);
+            assert!(b.cancel_confirm_open(), "已有画板存在改动时应弹出确认框");
+        })
+        .unwrap();
+    bvcx2.run_until_parked();
+    assert!(exist_events.borrow().is_empty());
+
+    // 确认放弃：对象库恢复为 1 个原始节点，且不删除文档嵌入块
+    ewin2.update(&mut bvcx2, |b, _, cx| b.confirm_cancel(cx)).unwrap();
+    bvcx2.run_until_parked();
+    assert_eq!(*exist_events.borrow(), vec![false]);
+    let restored = crate::objects::board(&existing_id).unwrap();
+    assert_eq!(restored.els.len(), 1);
+    assert_eq!(restored.els[0].text, "原始节点");
+
+    store.flush();
+    std::env::remove_var(crate::store::DATA_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}

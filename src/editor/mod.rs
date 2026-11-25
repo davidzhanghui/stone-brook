@@ -1176,6 +1176,26 @@ impl Editor {
         self.insert_blocks_after_cursor(vec![b], cx);
     }
 
+    /// 移除文档中指定对象 id 的嵌入块（例如新建画板取消时自动清理空画板占位块）。
+    pub fn remove_embed_by_id(&mut self, oid: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.content.blocks.iter().position(|b| matches!(&b.kind, crate::model::BlockKind::Embed { id, .. } if id == oid)) else {
+            return;
+        };
+        self.checkpoint(EditKind::Other);
+        if self.content.blocks.len() <= 2 && ix == 1 {
+            let b = self.block_mut(ix);
+            b.kind = crate::model::BlockKind::Text;
+            b.text = crate::model::RichText::default();
+            self.core.head = Pos::new(ix, 0, 0);
+        } else {
+            self.remove_blocks(ix..ix + 1);
+            let target = ix.saturating_sub(1).max(1).min(self.content.blocks.len() - 1);
+            self.core.head = self.slot_end(target);
+        }
+        self.core.anchor = self.core.head;
+        self.changed(cx);
+    }
+
     /// 字号 / 页宽变化后重新排版（保留滚动位置）。
     pub fn relayout(&mut self, cx: &mut Context<Self>) {
         let top = self.list.logical_scroll_top();
