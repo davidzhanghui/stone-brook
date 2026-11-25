@@ -1,6 +1,6 @@
 [package]
 name = "stonebrook"
-version = "2.6.1"
+version = "2.7.0"
 edition = "2021"
 license = "MIT"
 description = "石渠 Stonebrook — 本地块级文档编辑器"
