@@ -1,5 +1,5 @@
 #!/bin/bash
-# 石渠一键构建：环境检查 → 格式 / lint 检查 → 单元测试 → release 编译 → 组装 .app（ad-hoc 签名）→ 制作 DMG。
+# 石渠一键构建：环境检查 → 格式 / lint 检查 → 单元测试 → release 编译 → 组装 .app（代码签名）→ 制作 DMG。
 #
 # 用法：scripts/build.sh [选项]
 #   --fast        跳过格式、clippy 与单元测试，只编译打包
@@ -92,9 +92,30 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-step "ad-hoc 签名"
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1
-codesign --verify "$APP" || fail "签名校验失败"
+step "代码签名"
+# 签名优先级：
+# 1) 显式指定 CODESIGN_IDENTITY（CI 发版通过临时钥匙串传入 SHA-1 指纹，或本地手动指定）
+# 2) 本地钥匙串中已信任的统一证书 "ShuLan App Signing"（保持跨版本签名身份稳定）
+# 3) 回退 ad-hoc 签名（当 REQUIRE_CODESIGN=1 时禁止回退，防止 CI 静默产出 ad-hoc 包）
+CODESIGN_ARGS=(--force --deep)
+[ -n "${CODESIGN_KEYCHAIN:-}" ] && CODESIGN_ARGS+=(--keychain "$CODESIGN_KEYCHAIN")
+
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  codesign "${CODESIGN_ARGS[@]}" --sign "$CODESIGN_IDENTITY" "$APP"
+elif [ "${REQUIRE_CODESIGN:-0}" = "1" ]; then
+  fail "REQUIRE_CODESIGN=1 但未设置 CODESIGN_IDENTITY"
+elif security find-identity -v -p codesigning | grep -q '"ShuLan App Signing"'; then
+  codesign "${CODESIGN_ARGS[@]}" --sign "ShuLan App Signing" "$APP"
+else
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1
+fi
+codesign --verify --deep --strict "$APP" || fail "签名校验失败"
+if [ "${REQUIRE_CODESIGN:-0}" = "1" ]; then
+  req=$(codesign -d -r - "$APP" 2>&1)
+  if echo "$req" | grep -q "cdhash" || ! echo "$req" | grep -q 'identifier "app.stonebrook"'; then
+    fail "签名结果未绑定固定证书，拒绝发版: $req"
+  fi
+fi
 
 # ───────────── DMG ─────────────
 if [ "$DMG" = 1 ]; then

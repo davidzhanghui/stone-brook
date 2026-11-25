@@ -45,9 +45,55 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
+      - name: Import code signing certificate
+        env:
+          CODESIGN_CERT_P12_BASE64: ${{ secrets.CODESIGN_CERT_P12_BASE64 }}
+          CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CODESIGN_CERT_P12_BASE64" ] || [ -z "$CODESIGN_CERT_PASSWORD" ]; then
+            echo "::error::Missing CODESIGN_CERT_P12_BASE64 or CODESIGN_CERT_PASSWORD secret"
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/stonebrook-codesign.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/stonebrook-signing.keychain-db"
+          KEYCHAIN_PASS=$(openssl rand -hex 24)
+
+          printf '%s' "$CODESIGN_CERT_P12_BASE64" | tr -d '[:space:]' | base64 -D > "$CERT_PATH"
+          chmod 600 "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CODESIGN_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH" >/dev/null
+
+          # 将临时钥匙串加入搜索列表，确保 codesign 能定位自签名证书
+          KEYCHAINS=("$KEYCHAIN_PATH")
+          while IFS= read -r kc; do
+            [ -n "$kc" ] && KEYCHAINS+=("$kc")
+          done < <(security list-keychains -d user | awk -F'"' '/"/{print $2}')
+          security list-keychains -d user -s "${KEYCHAINS[@]}"
+
+          # 自动提取证书 SHA-1 指纹（同时兼容固定自签名证书与未来的 Developer ID 证书）
+          IDENTITY_HASH=$(security find-identity -p codesigning "$KEYCHAIN_PATH" | awk '/^[[:space:]]*[0-9]+\)/ {print $2; exit}')
+          if [ -z "$IDENTITY_HASH" ]; then
+            echo "::error::No code signing identity found in imported .p12"
+            security find-identity -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$IDENTITY_HASH" >> "$GITHUB_ENV"
+          echo "CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "Imported signing identity: $IDENTITY_HASH"
+          rm -f "$CERT_PATH"
+
       # 检查已在 check 任务里做过，这里只构建
       - name: Build app and DMG
-        run: scripts/build.sh --fast
+        env:
+          REQUIRE_CODESIGN: "1"
+        run: |
+          scripts/build.sh --fast
+          codesign -dv --verbose=2 "dist/石渠.app" 2>&1
+          codesign -d -r - "dist/石渠.app" 2>&1
 
       - name: Rename artifacts
         id: pkg
@@ -57,6 +103,14 @@ jobs:
           cp "dist/石渠-${VERSION}.dmg" "out/Stonebrook-${VERSION}-${{ matrix.arch }}.dmg"
           ditto -c -k --keepParent "dist/石渠.app" "out/Stonebrook-${VERSION}-${{ matrix.arch }}.app.zip"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up signing keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/stonebrook-codesign.p12"
+          if [ -n "${CODESIGN_KEYCHAIN:-}" ] && [ -f "$CODESIGN_KEYCHAIN" ]; then
+            security delete-keychain "$CODESIGN_KEYCHAIN" || true
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

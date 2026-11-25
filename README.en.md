@@ -11,7 +11,7 @@ No account, no cloud. Everything lives in one SQLite file on your machine (only 
 
 ![logo](assets/logo-256.png)
 
-- Version **2.6.0**. macOS 12+ only (AppKit, WKWebView, AVFoundation).
+- Version **2.6.1**. macOS 12+ only (AppKit, WKWebView, AVFoundation).
 - The English UI covers the main window (sidebar, menus, command palette, settings, slash menu, toolbars). The full-screen board, spreadsheet, and database editors are not translated yet and still show Chinese.
 - Full feature list (Chinese): [docs/FEATURES.md](docs/FEATURES.md)
 - Website (Chinese): <https://davidzhanghui.github.io/stone-brook/>

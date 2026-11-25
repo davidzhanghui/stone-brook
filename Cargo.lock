@@ -6121,7 +6121,7 @@ dependencies = [
 
 [[package]]
 name = "stonebrook"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
