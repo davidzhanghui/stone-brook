@@ -373,13 +373,7 @@ impl Graph {
     /// - 所有跨通道水平转折严格落在相邻两层之间的无节点走廊里，并按交叉最小化顺序分配互不重叠的轨道；
     /// - 菱形左右顶点出线直接做 L 形折转；
     /// - 回边沿最外侧通道走干净的 C 形包络，绝不穿插节点。
-    fn route_orthogonal(
-        &self,
-        rects: &[crate::canvas::Rect],
-        lay: &sugiyama::Layout,
-        paths: &mut [Option<Vec<Pt>>],
-        port_normals: &[Option<(Pt, Pt)>],
-    ) {
+    fn route_orthogonal(&self, rects: &[crate::canvas::Rect], lay: &sugiyama::Layout, paths: &mut [Option<Vec<Pt>>], port_normals: &[Option<(Pt, Pt)>]) {
         let horiz = self.dir.horizontal();
         let rev_axis = matches!(self.dir, Dir::BT | Dir::RL);
         let main_of = |p: Pt| if horiz { p.x } else { p.y };
@@ -510,11 +504,7 @@ impl Graph {
             }
             let mut jogs = vec![];
             for b in lf..lt {
-                let next_c = if b + 1 < lt {
-                    dummies.get(b - lf).map(|&p| cross_of(p)).unwrap_or_else(|| cross_of(p1))
-                } else {
-                    cross_of(p1)
-                };
+                let next_c = if b + 1 < lt { dummies.get(b - lf).map(|&p| cross_of(p)).unwrap_or_else(|| cross_of(p1)) } else { cross_of(p1) };
                 if (cur_c - next_c).abs() >= 2.0 && b + 1 < nlayers {
                     let id = all_jogs.len();
                     all_jogs.push(BandJog { band: b, c_from: cur_c, c_to: next_c, c_lo: cur_c.min(next_c), c_hi: cur_c.max(next_c) });

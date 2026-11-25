@@ -438,11 +438,7 @@ impl TextArea {
         if o == 0 {
             return 0;
         }
-        crate::words::segments(&self.content)
-            .into_iter()
-            .rev()
-            .find_map(|(i, w)| (i < o && w.chars().any(|c| c.is_alphanumeric())).then_some(i))
-            .unwrap_or(0)
+        crate::words::segments(&self.content).into_iter().rev().find_map(|(i, w)| (i < o && w.chars().any(|c| c.is_alphanumeric())).then_some(i)).unwrap_or(0)
     }
 
     fn next_word_boundary(&self, o: usize) -> usize {
@@ -1118,7 +1114,9 @@ impl Render for TextArea {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_str_range, TDeleteLineBack, TDocStart, TRedo, TSelectDocEnd, TSelectEnd, TSelectHome, TSelectWordLeft, TUndo, TWordRight, TextArea, TextStyle};
+    use super::{
+        clamp_str_range, TDeleteLineBack, TDocStart, TRedo, TSelectDocEnd, TSelectEnd, TSelectHome, TSelectWordLeft, TUndo, TWordRight, TextArea, TextStyle,
+    };
 
     #[test]
     fn clamp_keeps_char_boundaries_for_multiline() {

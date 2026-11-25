@@ -559,7 +559,8 @@ fn transpose(layers: &mut [Vec<usize>], up: &[Vec<usize>], down: &[Vec<usize>], 
                 }
                 let before = pair_cross(a, b, up, &pos) + pair_cross(a, b, down, &pos);
                 let after = pair_cross(b, a, up, &pos) + pair_cross(b, a, down, &pos);
-                let push_back_outer = after == before && ((i < mid && !is_back_dummy[a] && is_back_dummy[b]) || (i + 1 >= mid && is_back_dummy[a] && !is_back_dummy[b]));
+                let push_back_outer =
+                    after == before && ((i < mid && !is_back_dummy[a] && is_back_dummy[b]) || (i + 1 >= mid && is_back_dummy[a] && !is_back_dummy[b]));
                 if after < before || push_back_outer {
                     l.swap(i, i + 1);
                     pos[a] = i + 1;

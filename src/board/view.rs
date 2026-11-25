@@ -357,7 +357,9 @@ pub(super) struct Picker {
 pub enum BoardEvent {
     Close,
     /// 取消编辑：若为新建空画板（`remove_embed = true`），工作区同时删除文档里的空画板块和对象
-    Cancel { remove_embed: bool },
+    Cancel {
+        remove_embed: bool,
+    },
     /// 预览画板（以思维导图查看文档）：插入到文档光标处
     Insert,
 }

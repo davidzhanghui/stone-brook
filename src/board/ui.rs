@@ -598,9 +598,7 @@ impl BoardEditor {
                             cx.emit(BoardEvent::Insert);
                         })))
                     })
-                    .when(!self.preview, |d| {
-                        d.child(text_btn("tb-cancel", "取消", false).on_click(cx.listener(|this, _, _, cx| this.request_cancel(cx))))
-                    })
+                    .when(!self.preview, |d| d.child(text_btn("tb-cancel", "取消", false).on_click(cx.listener(|this, _, _, cx| this.request_cancel(cx)))))
                     .child(
                         div()
                             .id("tb-done")

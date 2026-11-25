@@ -916,18 +916,10 @@ pub fn basis_cmds(pts: &[Pt]) -> Vec<PathCmd> {
     out.push(PathCmd::Cubic(mix(pts[0], 2. / 3., pts[1], 1. / 3.), mix(pts[0], 1. / 3., pts[1], 2. / 3.), tri(pts[0], pts[1], pts[2])));
     // 中间各段：标准均匀三次 B 样条转贝塞尔
     for i in 1..n - 2 {
-        out.push(PathCmd::Cubic(
-            mix(pts[i], 2. / 3., pts[i + 1], 1. / 3.),
-            mix(pts[i], 1. / 3., pts[i + 1], 2. / 3.),
-            tri(pts[i], pts[i + 1], pts[i + 2]),
-        ));
+        out.push(PathCmd::Cubic(mix(pts[i], 2. / 3., pts[i + 1], 1. / 3.), mix(pts[i], 1. / 3., pts[i + 1], 2. / 3.), tri(pts[i], pts[i + 1], pts[i + 2])));
     }
     // 尾段：沿 pts[n-1] - pts[n-2] 平滑落入 pts[n-1]
-    out.push(PathCmd::Cubic(
-        mix(pts[n - 2], 2. / 3., pts[n - 1], 1. / 3.),
-        mix(pts[n - 2], 1. / 3., pts[n - 1], 2. / 3.),
-        pts[n - 1],
-    ));
+    out.push(PathCmd::Cubic(mix(pts[n - 2], 2. / 3., pts[n - 1], 1. / 3.), mix(pts[n - 2], 1. / 3., pts[n - 1], 2. / 3.), pts[n - 1]));
     out
 }
 
